@@ -302,20 +302,6 @@ class LoadExtractionApp:
         tk.Label(right_frame, text="Enter ALL or 123,456,789",
                  font=("Segoe UI", 8), bg=self.COLORS['dark_bg'], fg=self.COLORS['text_light']).pack(anchor="w", padx=0, pady=(0, 12))
 
-        # Element IDs
-        elem_label = tk.Label(right_frame, text="🔧 Element IDs", font=("Segoe UI", 10, "bold"),
-                             bg=self.COLORS['dark_bg'], fg=self.COLORS['accent'])
-        elem_label.pack(anchor="w", padx=0, pady=(0, 5))
-        self.element_id_entry = tk.Entry(right_frame, font=("Segoe UI", 10),
-                                        bg="#3a3a4a", fg=self.COLORS['text'],
-                                        insertbackground=self.COLORS['accent'],
-                                        relief="flat", bd=0)
-        self.element_id_entry.pack(fill="x", padx=0, pady=(0, 3), ipady=5)
-        self.element_id_entry.insert(0, "ALL")
-        self.element_id_entry.bind("<KeyRelease>", lambda e: self.update_bush_ids())
-        tk.Label(right_frame, text="Enter ALL or 452,678,890",
-                 font=("Segoe UI", 8), bg=self.COLORS['dark_bg'], fg=self.COLORS['text_light']).pack(anchor="w", padx=0, pady=(0, 12))
-
         # Load Cases
         lc_label = tk.Label(right_frame, text="⏱️  Load Cases", font=("Segoe UI", 10, "bold"),
                            bg=self.COLORS['dark_bg'], fg=self.COLORS['accent'])
@@ -538,6 +524,13 @@ class LoadExtractionApp:
             if (element.type == "CQUAD4" or element.type == "CTRIA3") and element.pid in target_property_ids
         }
 
+        all_lc_pshell = list(set(op2.cquad4_force.keys()).union(op2.ctria3_force.keys()))
+        lc_input_str = self.loadcase_id_entry.get().strip()
+        target_lc_ids = set(parse_id_input(lc_input_str, all_lc_pshell))
+        if not target_lc_ids:
+            target_lc_ids = set(all_lc_pshell)
+        self.logger.info(f"✓ {len(target_lc_ids)} load case seçildi")
+
         property_forces = {
             load_case_id: {
                 pid:{'Nx':0.0, 'Ny':0.0, 'Nxy':0.0}
@@ -568,6 +561,8 @@ class LoadExtractionApp:
 
         self.logger.info("🔄 Element forces işleniyor...")
         for load_case_id, element_forces in op2_data.cquad4_force.items():
+            if load_case_id not in target_lc_ids:
+                continue
             element_ids = element_forces.element
             forces_data = element_forces.data[0]
             load_ids = element_forces.loadIDs[0]
@@ -590,6 +585,8 @@ class LoadExtractionApp:
                     })
 
         for load_case_id, element_forces in op2_data.ctria3_force.items():
+            if load_case_id not in target_lc_ids:
+                continue
             element_ids = element_forces.element
             forces_data = element_forces.data[0]
             load_ids = element_forces.loadIDs[0]
@@ -618,6 +615,8 @@ class LoadExtractionApp:
 
         Average_forces = []
         for load_case_id, force_by_property in property_forces.items():
+            if load_case_id not in target_lc_ids:
+                continue
             for property_id, forces in force_by_property.items():
                 total_area = property_areas[property_id]
                 Average_Nx = forces['Nx'] / total_area
@@ -690,9 +689,18 @@ class LoadExtractionApp:
             selected_element_ids = all_eids
         self.logger.info(f"✓ {len(selected_element_ids)} element ID seçildi")
 
+        all_lc_bush = list(op2.cbush_force.keys())
+        lc_input_str = self.bush_loadcase_id_entry.get().strip()
+        target_lc_bush = set(parse_id_input(lc_input_str, all_lc_bush))
+        if not target_lc_bush:
+            target_lc_bush = set(all_lc_bush)
+        self.logger.info(f"✓ {len(target_lc_bush)} load case seçildi")
+
         self.logger.info("🔄 Bush force verileri çıkarılıyor...")
         bush_forces_data = []
         for load_case_id, element_forces in op2.cbush_force.items():
+            if load_case_id not in target_lc_bush:
+                continue
             element_ids = element_forces.element
             forces_data = element_forces.data[0]
             load_ids = element_forces.loadIDs[0]
