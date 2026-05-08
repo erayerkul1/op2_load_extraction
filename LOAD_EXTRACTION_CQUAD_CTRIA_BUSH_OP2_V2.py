@@ -141,6 +141,27 @@ def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
     result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
     return result
 
+def extract_critical_stress(stress_data, group_key):
+    vm_z1_key = 'VM_Z1'  if group_key == 'Element ID' else 'Avg_VM_Z1'
+    vm_z2_key = 'VM_Z2'  if group_key == 'Element ID' else 'Avg_VM_Z2'
+    enriched  = {}
+    group_lcs = {}
+    for row in stress_data:
+        gid = row[group_key]
+        lc  = row['Load Case ID']
+        key = (gid, lc)
+        if key in enriched:
+            continue
+        vm_max = max(abs(float(row.get(vm_z1_key, 0))), abs(float(row.get(vm_z2_key, 0))))
+        r = {**row, '_vm_max': vm_max, '_selected': False}
+        enriched[key] = r
+        group_lcs.setdefault(gid, []).append(r)
+    for gid, rows in group_lcs.items():
+        max(rows, key=lambda r: r['_vm_max'])['_selected'] = True
+    result = [r for r in enriched.values() if r['_selected']]
+    result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
+    return result
+
 def parse_id_input(input_str, all_ids=None):
     input_str = input_str.strip().upper()
     if input_str == "ALL":
@@ -538,7 +559,7 @@ class LoadExtractionApp:
 
         property_forces = {
             load_case_id: {
-                pid:{'Nx':0.0, 'Ny':0.0, 'Nxy':0.0}
+                pid: {'Nx':0.0,'Ny':0.0,'Nxy':0.0,'Mx':0.0,'My':0.0,'Mxy':0.0}
                 for pid in target_property_ids
             }
             for load_case_id in set(op2.cquad4_force.keys()).union(op2.ctria3_force.keys())
@@ -546,6 +567,13 @@ class LoadExtractionApp:
 
         property_areas = {}
         element_areas = {}
+        property_thickness = {}
+
+        for pid in target_property_ids:
+            try:
+                property_thickness[pid] = float(bdf.properties[pid].t)
+            except Exception:
+                property_thickness[pid] = 0.0
 
         for element_id, element in bdf.elements.items():
             if element.pid in target_property_ids:
@@ -574,19 +602,18 @@ class LoadExtractionApp:
             for element_id, element_property_id in elements_with_properties.items():
                 if element_id in element_ids:
                     index = np.where(element_ids == element_id)[0][0]
-                    forces = forces_data[index][:3]
+                    f = forces_data[index]
                     area = element_areas[element_id]
-                    property_forces[load_case_id][element_property_id]['Nx'] += forces[0] * area
-                    property_forces[load_case_id][element_property_id]['Ny'] += forces[1] * area
-                    property_forces[load_case_id][element_property_id]['Nxy'] += forces[2] * area
+                    pf = property_forces[load_case_id][element_property_id]
+                    pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
+                    pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
                     element_base_data.append({
-                        'Property ID':element_property_id,
-                        'Element ID':element_id,
-                        'Load Case ID':load_ids,
-                        'Nx':forces[0],
-                        'Ny':forces[1],
-                        'Nxy':forces[2],
-                        'Area':area
+                        'Property ID': element_property_id,
+                        'Element ID':  element_id,
+                        'Load Case ID': load_ids,
+                        'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
+                        'Mx': f[3], 'My': f[4], 'Mxy': f[5],
+                        'Thickness': property_thickness[element_property_id],
                     })
 
         for load_case_id, element_forces in op2_data.ctria3_force.items():
@@ -598,19 +625,18 @@ class LoadExtractionApp:
             for element_id, element_property_id in elements_with_properties.items():
                 if element_id in element_ids:
                     index = np.where(element_ids == element_id)[0][0]
-                    forces = forces_data[index][:3]
+                    f = forces_data[index]
                     area = element_areas[element_id]
-                    property_forces[load_case_id][element_property_id]['Nx'] += forces[0] * area
-                    property_forces[load_case_id][element_property_id]['Ny'] += forces[1] * area
-                    property_forces[load_case_id][element_property_id]['Nxy'] += forces[2] * area
+                    pf = property_forces[load_case_id][element_property_id]
+                    pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
+                    pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
                     element_base_data.append({
-                        'Property ID':element_property_id,
-                        'Element ID':element_id,
-                        'Load Case ID':load_ids,
-                        'Nx':forces[0],
-                        'Ny':forces[1],
-                        'Nxy':forces[2],
-                        'Area':area
+                        'Property ID': element_property_id,
+                        'Element ID':  element_id,
+                        'Load Case ID': load_ids,
+                        'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
+                        'Mx': f[3], 'My': f[4], 'Mxy': f[5],
+                        'Thickness': property_thickness[element_property_id],
                     })
 
         df = pd.DataFrame(element_base_data)
@@ -624,16 +650,16 @@ class LoadExtractionApp:
                 continue
             for property_id, forces in force_by_property.items():
                 total_area = property_areas[property_id]
-                Average_Nx = forces['Nx'] / total_area
-                Average_Ny = forces['Ny'] / total_area
-                Average_Nxy = forces['Nxy'] / total_area
                 Average_forces.append({
-                    'Property ID':property_id,
-                    'Load Case ID':load_case_id,
-                    'Average Nx':Average_Nx,
-                    'Average Ny':Average_Ny,
-                    'Average_Nxy':Average_Nxy,
-                    'Average_Area':total_area
+                    'Property ID':  property_id,
+                    'Load Case ID': load_case_id,
+                    'Average Nx':  forces['Nx']  / total_area,
+                    'Average Ny':  forces['Ny']  / total_area,
+                    'Average Nxy': forces['Nxy'] / total_area,
+                    'Average Mx':  forces['Mx']  / total_area,
+                    'Average My':  forces['My']  / total_area,
+                    'Average Mxy': forces['Mxy'] / total_area,
+                    'Thickness':   property_thickness[property_id],
                 })
 
         df2 = pd.DataFrame(Average_forces)
@@ -644,13 +670,12 @@ class LoadExtractionApp:
         self.logger.info("🔄 Element reduction hesaplanıyor (16 metrik)...")
         critical_elem = extract_critical_pshell(element_base_data, 'Element ID', 'Nx', 'Ny', 'Nxy')
         reduced_elem = [{
-            'Property ID':r['Property ID'],
-            'Element ID':r['Element ID'],
-            'Load Case ID':r['Load Case ID'],
-            'Nx':r['_nx'],
-            'Ny':r['_ny'],
-            'Nxy':r['_nxy'],
-            'Area':r['Area'],
+            'Property ID':  r['Property ID'],
+            'Element ID':   r['Element ID'],
+            'Load Case ID': r['Load Case ID'],
+            'Nx': r['_nx'], 'Ny': r['_ny'], 'Nxy': r['_nxy'],
+            'Mx': r['Mx'],  'My': r['My'],  'Mxy': r['Mxy'],
+            'Thickness': r['Thickness'],
         } for r in critical_elem]
         df_elem_reduced = pd.DataFrame(reduced_elem)
         output_csv_elem_reduced = os.path.join(self.stress_output_now2, 'Element_Load_Reduced.csv')
@@ -658,19 +683,130 @@ class LoadExtractionApp:
         self.logger.info(f"✓ Element_Load_Reduced.csv yazıldı ({len(df_elem_reduced)} kritik satır)")
 
         self.logger.info("🔄 Average reduction hesaplanıyor (16 metrik)...")
-        critical_avg = extract_critical_pshell(Average_forces, 'Property ID', 'Average Nx', 'Average Ny', 'Average_Nxy')
+        critical_avg = extract_critical_pshell(Average_forces, 'Property ID', 'Average Nx', 'Average Ny', 'Average Nxy')
         reduced_avg = [{
-            'Property ID':r['Property ID'],
-            'Load Case ID':r['Load Case ID'],
-            'Average Nx':r['_nx'],
-            'Average Ny':r['_ny'],
-            'Average_Nxy':r['_nxy'],
-            'Average_Area':r['Average_Area'],
+            'Property ID':  r['Property ID'],
+            'Load Case ID': r['Load Case ID'],
+            'Average Nx':  r['_nx'], 'Average Ny':  r['_ny'], 'Average Nxy': r['_nxy'],
+            'Average Mx':  r['Average Mx'],
+            'Average My':  r['Average My'],
+            'Average Mxy': r['Average Mxy'],
+            'Thickness':   r['Thickness'],
         } for r in critical_avg]
         df_avg_reduced = pd.DataFrame(reduced_avg)
         output_csv_avg_reduced = os.path.join(self.stress_output_now2, 'Average_Load_Reduced.csv')
         df_avg_reduced.to_csv(output_csv_avg_reduced, index=False)
         self.logger.info(f"✓ Average_Load_Reduced.csv yazıldı ({len(df_avg_reduced)} kritik satır)")
+
+        # ── STRESS SECTION ────────────────────────────────────────────────
+        self.logger.info("🔄 Stress verileri işleniyor...")
+        element_stress_data = []
+        property_stress = {
+            lc: {
+                pid: dict(sx1=0.,sy1=0.,sxy1=0.,vm1=0.,p1_1=0.,p2_1=0.,
+                          sx2=0.,sy2=0.,sxy2=0.,vm2=0.,p1_2=0.,p2_2=0.)
+                for pid in target_property_ids
+            }
+            for lc in target_lc_ids
+        }
+
+        stress_sources = []
+        if hasattr(op2_data, 'cquad4_stress') and op2_data.cquad4_stress:
+            stress_sources.append(op2_data.cquad4_stress)
+        if hasattr(op2_data, 'ctria3_stress') and op2_data.ctria3_stress:
+            stress_sources.append(op2_data.ctria3_stress)
+
+        for stress_dict in stress_sources:
+            for load_case_id, stress_result in stress_dict.items():
+                if load_case_id not in target_lc_ids:
+                    continue
+                eids_s   = stress_result.element_node[:, 0].astype(int)
+                sdata    = stress_result.data[0]  # (ntotal,8): [fd,oxx,oyy,txy,angle,omax,omin,vm]
+                load_ids = stress_result.loadIDs[0]
+                eid_to_sidx = {}
+                for i, eid in enumerate(eids_s):
+                    eid_to_sidx.setdefault(int(eid), []).append(i)
+                for element_id, pid in elements_with_properties.items():
+                    if element_id not in eid_to_sidx:
+                        continue
+                    idxs = eid_to_sidx[element_id]
+                    if len(idxs) < 2:
+                        continue
+                    z1   = sdata[idxs[0]]
+                    z2   = sdata[idxs[1]]
+                    area = element_areas.get(element_id, 0.0)
+                    ps   = property_stress[load_case_id][pid]
+                    ps['sx1']  += z1[1]*area; ps['sy1']  += z1[2]*area; ps['sxy1'] += z1[3]*area
+                    ps['vm1']  += z1[7]*area; ps['p1_1'] += z1[5]*area; ps['p2_1'] += z1[6]*area
+                    ps['sx2']  += z2[1]*area; ps['sy2']  += z2[2]*area; ps['sxy2'] += z2[3]*area
+                    ps['vm2']  += z2[7]*area; ps['p1_2'] += z2[5]*area; ps['p2_2'] += z2[6]*area
+                    element_stress_data.append({
+                        'Property ID': pid,
+                        'Element ID':  element_id,
+                        'Load Case ID': load_ids,
+                        'Sx_Z1':  z1[1], 'Sy_Z1':  z1[2], 'Sxy_Z1': z1[3],
+                        'VM_Z1':  z1[7], 'P1_Z1':  z1[5], 'P2_Z1':  z1[6],
+                        'Sx_Z2':  z2[1], 'Sy_Z2':  z2[2], 'Sxy_Z2': z2[3],
+                        'VM_Z2':  z2[7], 'P1_Z2':  z2[5], 'P2_Z2':  z2[6],
+                    })
+
+        if element_stress_data:
+            df_stress = pd.DataFrame(element_stress_data)
+            df_stress.to_csv(os.path.join(self.stress_output_now2, 'Element_Stress.csv'), index=False)
+            self.logger.info(f"✓ Element_Stress.csv yazıldı ({len(df_stress)} satır)")
+
+            average_stress_data = []
+            for lc in target_lc_ids:
+                if lc not in property_stress:
+                    continue
+                for pid in target_property_ids:
+                    ta = property_areas.get(pid, 0.0)
+                    if ta == 0.0:
+                        continue
+                    ps = property_stress[lc][pid]
+                    average_stress_data.append({
+                        'Property ID':  pid,
+                        'Load Case ID': lc,
+                        'Avg_Sx_Z1':  ps['sx1']/ta,  'Avg_Sy_Z1':  ps['sy1']/ta,  'Avg_Sxy_Z1': ps['sxy1']/ta,
+                        'Avg_VM_Z1':  ps['vm1']/ta,  'Avg_P1_Z1':  ps['p1_1']/ta, 'Avg_P2_Z1':  ps['p2_1']/ta,
+                        'Avg_Sx_Z2':  ps['sx2']/ta,  'Avg_Sy_Z2':  ps['sy2']/ta,  'Avg_Sxy_Z2': ps['sxy2']/ta,
+                        'Avg_VM_Z2':  ps['vm2']/ta,  'Avg_P1_Z2':  ps['p1_2']/ta, 'Avg_P2_Z2':  ps['p2_2']/ta,
+                    })
+
+            df_avg_stress = pd.DataFrame(average_stress_data)
+            df_avg_stress.to_csv(os.path.join(self.stress_output_now2, 'Average_Stress.csv'), index=False)
+            self.logger.info(f"✓ Average_Stress.csv yazıldı ({len(df_avg_stress)} satır)")
+
+            self.logger.info("🔄 Element stress reduction hesaplanıyor (max VM)...")
+            critical_stress_elem = extract_critical_stress(element_stress_data, 'Element ID')
+            reduced_stress_elem = [{
+                'Property ID':  r['Property ID'],
+                'Element ID':   r['Element ID'],
+                'Load Case ID': r['Load Case ID'],
+                'Sx_Z1':  r['Sx_Z1'],  'Sy_Z1':  r['Sy_Z1'],  'Sxy_Z1': r['Sxy_Z1'],
+                'VM_Z1':  r['VM_Z1'],  'P1_Z1':  r['P1_Z1'],  'P2_Z1':  r['P2_Z1'],
+                'Sx_Z2':  r['Sx_Z2'],  'Sy_Z2':  r['Sy_Z2'],  'Sxy_Z2': r['Sxy_Z2'],
+                'VM_Z2':  r['VM_Z2'],  'P1_Z2':  r['P1_Z2'],  'P2_Z2':  r['P2_Z2'],
+            } for r in critical_stress_elem]
+            df_stress_reduced = pd.DataFrame(reduced_stress_elem)
+            df_stress_reduced.to_csv(os.path.join(self.stress_output_now2, 'Element_Stress_Reduced.csv'), index=False)
+            self.logger.info(f"✓ Element_Stress_Reduced.csv yazıldı ({len(df_stress_reduced)} kritik satır)")
+
+            self.logger.info("🔄 Average stress reduction hesaplanıyor (max VM)...")
+            critical_stress_avg = extract_critical_stress(average_stress_data, 'Property ID')
+            reduced_stress_avg = [{
+                'Property ID':  r['Property ID'],
+                'Load Case ID': r['Load Case ID'],
+                'Avg_Sx_Z1':  r['Avg_Sx_Z1'],  'Avg_Sy_Z1':  r['Avg_Sy_Z1'],  'Avg_Sxy_Z1': r['Avg_Sxy_Z1'],
+                'Avg_VM_Z1':  r['Avg_VM_Z1'],  'Avg_P1_Z1':  r['Avg_P1_Z1'],  'Avg_P2_Z1':  r['Avg_P2_Z1'],
+                'Avg_Sx_Z2':  r['Avg_Sx_Z2'],  'Avg_Sy_Z2':  r['Avg_Sy_Z2'],  'Avg_Sxy_Z2': r['Avg_Sxy_Z2'],
+                'Avg_VM_Z2':  r['Avg_VM_Z2'],  'Avg_P1_Z2':  r['Avg_P1_Z2'],  'Avg_P2_Z2':  r['Avg_P2_Z2'],
+            } for r in critical_stress_avg]
+            df_avg_stress_reduced = pd.DataFrame(reduced_stress_avg)
+            df_avg_stress_reduced.to_csv(os.path.join(self.stress_output_now2, 'Average_Stress_Reduced.csv'), index=False)
+            self.logger.info(f"✓ Average_Stress_Reduced.csv yazıldı ({len(df_avg_stress_reduced)} kritik satır)")
+        else:
+            self.logger.info("⚠ Stress verisi bulunamadı (OP2'de STRESS output yok)")
 
     # ─────────────────────────────────────────────────────────────────────────
     # BUSH EXTRACTION
