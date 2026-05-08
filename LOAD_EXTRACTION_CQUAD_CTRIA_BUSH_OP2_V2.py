@@ -795,8 +795,9 @@ class LoadExtractionApp:
         op2_data = data_in_material_coord(bdf, op2, in_place=False) if is_material else op2
 
         all_lc_stress = list(set(
-            list(op2_data.cquad4_stress.keys()) + list(op2_data.ctria3_stress.keys())
-        ) if hasattr(op2_data, 'cquad4_stress') else [])
+            (list(op2_data.cquad4_stress.keys()) if hasattr(op2_data, 'cquad4_stress') and op2_data.cquad4_stress else []) +
+            (list(op2_data.ctria3_stress.keys())  if hasattr(op2_data, 'ctria3_stress')  and op2_data.ctria3_stress  else [])
+        ))
         lc_str = self.stress_lc_entry.get().strip()
         target_lc_ids = set(parse_id_input(lc_str, all_lc_stress))
         if not target_lc_ids:
@@ -821,33 +822,36 @@ class LoadExtractionApp:
             stress_sources.append(op2_data.ctria3_stress)
 
         for stress_dict in stress_sources:
+            # Build element lookup ONCE — element order is same for all OP2 subcases
+            first_sr    = next(iter(stress_dict.values()))
+            eids_s      = first_sr.element_node[:, 0].astype(int)
+            eid_to_sidx = {}
+            for i, eid in enumerate(eids_s):
+                eid_to_sidx.setdefault(int(eid), []).append(i)
+
+            # Pre-compute target (eid, pid, z1_idx, z2_idx, area) once
+            target_elems = [
+                (eid, pid, eid_to_sidx[eid][0], eid_to_sidx[eid][1], element_areas.get(eid, 0.0))
+                for eid, pid in elements_with_properties.items()
+                if eid in eid_to_sidx and len(eid_to_sidx[eid]) >= 2
+            ]
+            self.logger.info(f"✓ {len(target_elems)} element stress verisi hazırlandı")
+
             for load_case_id, stress_result in stress_dict.items():
                 if load_case_id not in target_lc_ids:
                     continue
-                eids_s   = stress_result.element_node[:, 0].astype(int)
-                sdata    = stress_result.data[0]
-                load_ids = stress_result.loadIDs[0]
-                eid_to_sidx = {}
-                for i, eid in enumerate(eids_s):
-                    eid_to_sidx.setdefault(int(eid), []).append(i)
-                for element_id, pid in elements_with_properties.items():
-                    if element_id not in eid_to_sidx:
-                        continue
-                    idxs = eid_to_sidx[element_id]
-                    if len(idxs) < 2:
-                        continue
-                    z1   = sdata[idxs[0]]
-                    z2   = sdata[idxs[1]]
-                    area = element_areas.get(element_id, 0.0)
-                    ps   = property_stress[load_case_id][pid]
+                sdata = stress_result.data[0]
+                for eid, pid, z1i, z2i, area in target_elems:
+                    z1 = sdata[z1i];  z2 = sdata[z2i]
+                    ps = property_stress[load_case_id][pid]
                     ps['sx1']  += z1[1]*area; ps['sy1']  += z1[2]*area; ps['sxy1'] += z1[3]*area
                     ps['vm1']  += z1[7]*area; ps['p1_1'] += z1[5]*area; ps['p2_1'] += z1[6]*area
                     ps['sx2']  += z2[1]*area; ps['sy2']  += z2[2]*area; ps['sxy2'] += z2[3]*area
                     ps['vm2']  += z2[7]*area; ps['p1_2'] += z2[5]*area; ps['p2_2'] += z2[6]*area
                     element_stress_data.append({
                         'Property ID':  pid,
-                        'Element ID':   element_id,
-                        'Load Case ID': load_ids,
+                        'Element ID':   eid,
+                        'Load Case ID': load_case_id,
                         'Sx_Z1': z1[1], 'Sy_Z1': z1[2], 'Sxy_Z1': z1[3],
                         'VM_Z1': z1[7], 'P1_Z1': z1[5], 'P2_Z1': z1[6],
                         'Sx_Z2': z2[1], 'Sy_Z2': z2[2], 'Sxy_Z2': z2[3],
@@ -946,28 +950,37 @@ class LoadExtractionApp:
 
         self.logger.info("🔄 Displacement verileri işleniyor...")
         disp_data = []
+
+        # Build node lookup ONCE — node order is identical across all OP2 subcases
+        first_disp = next(iter(op2.displacements.values()))
+        all_nids   = first_disp.node_gridtype[:, 0].astype(int)
+        nid_to_idx = dict(zip(all_nids, range(len(all_nids))))
+
+        # Pre-compute (pid, nid, model_index) list once
+        pid_nid_idx = []
+        for pid, nodes in pid_to_nodes.items():
+            for nid in nodes:
+                idx = nid_to_idx.get(int(nid))
+                if idx is not None:
+                    pid_nid_idx.append((pid, int(nid), idx))
+        self.logger.info(f"✓ {len(pid_nid_idx)} (property, node) çifti hazırlandı")
+
         for lc_id, disp_result in op2.displacements.items():
             if lc_id not in target_lc:
                 continue
-            node_ids  = disp_result.node_gridtype[:, 0]
-            data      = disp_result.data[0]
-            lc_name   = disp_result.loadIDs[0]
-            nid_to_idx = {int(n): i for i, n in enumerate(node_ids)}
-            for pid, nodes in pid_to_nodes.items():
-                for nid in nodes:
-                    idx = nid_to_idx.get(nid)
-                    if idx is None:
-                        continue
-                    x, y, z   = float(data[idx][0]), float(data[idx][1]), float(data[idx][2])
-                    rx, ry, rz = float(data[idx][3]), float(data[idx][4]), float(data[idx][5])
-                    disp_data.append({
-                        'Property ID':  pid,
-                        'Node ID':      nid,
-                        'Load Case ID': lc_name,
-                        'X': x, 'Y': y, 'Z': z,
-                        'Magnitude': math.sqrt(x**2 + y**2 + z**2),
-                        'Rx': rx, 'Ry': ry, 'Rz': rz,
-                    })
+            data = disp_result.data[0]  # (nnodes, 6)
+            for pid, nid, idx in pid_nid_idx:
+                row = data[idx]
+                x, y, z   = float(row[0]), float(row[1]), float(row[2])
+                rx, ry, rz = float(row[3]), float(row[4]), float(row[5])
+                disp_data.append({
+                    'Property ID':  pid,
+                    'Node ID':      nid,
+                    'Load Case ID': lc_id,
+                    'X': x, 'Y': y, 'Z': z,
+                    'Magnitude': math.sqrt(x**2 + y**2 + z**2),
+                    'Rx': rx, 'Ry': ry, 'Rz': rz,
+                })
 
         df_all = pd.DataFrame(disp_data)
         df_all.to_csv(os.path.join(self.stress_output_now2, 'Displacement_All.csv'), index=False)
