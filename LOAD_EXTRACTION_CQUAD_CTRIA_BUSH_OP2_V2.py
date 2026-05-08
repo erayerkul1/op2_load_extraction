@@ -141,6 +141,27 @@ def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
     result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
     return result
 
+def extract_critical_stress(stress_data, group_key):
+    vm_z1_key = 'VM_Z1'  if group_key == 'Element ID' else 'Avg_VM_Z1'
+    vm_z2_key = 'VM_Z2'  if group_key == 'Element ID' else 'Avg_VM_Z2'
+    enriched  = {}
+    group_lcs = {}
+    for row in stress_data:
+        gid = row[group_key]
+        lc  = row['Load Case ID']
+        key = (gid, lc)
+        if key in enriched:
+            continue
+        vm_max = max(abs(float(row.get(vm_z1_key, 0))), abs(float(row.get(vm_z2_key, 0))))
+        r = {**row, '_vm_max': vm_max, '_selected': False}
+        enriched[key] = r
+        group_lcs.setdefault(gid, []).append(r)
+    for gid, rows in group_lcs.items():
+        max(rows, key=lambda r: r['_vm_max'])['_selected'] = True
+    result = [r for r in enriched.values() if r['_selected']]
+    result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
+    return result
+
 def parse_id_input(input_str, all_ids=None):
     input_str = input_str.strip().upper()
     if input_str == "ALL":
@@ -676,6 +697,116 @@ class LoadExtractionApp:
         output_csv_avg_reduced = os.path.join(self.stress_output_now2, 'Average_Load_Reduced.csv')
         df_avg_reduced.to_csv(output_csv_avg_reduced, index=False)
         self.logger.info(f"✓ Average_Load_Reduced.csv yazıldı ({len(df_avg_reduced)} kritik satır)")
+
+        # ── STRESS SECTION ────────────────────────────────────────────────
+        self.logger.info("🔄 Stress verileri işleniyor...")
+        element_stress_data = []
+        property_stress = {
+            lc: {
+                pid: dict(sx1=0.,sy1=0.,sxy1=0.,vm1=0.,p1_1=0.,p2_1=0.,
+                          sx2=0.,sy2=0.,sxy2=0.,vm2=0.,p1_2=0.,p2_2=0.)
+                for pid in target_property_ids
+            }
+            for lc in target_lc_ids
+        }
+
+        stress_sources = []
+        if hasattr(op2_data, 'cquad4_stress') and op2_data.cquad4_stress:
+            stress_sources.append(op2_data.cquad4_stress)
+        if hasattr(op2_data, 'ctria3_stress') and op2_data.ctria3_stress:
+            stress_sources.append(op2_data.ctria3_stress)
+
+        for stress_dict in stress_sources:
+            for load_case_id, stress_result in stress_dict.items():
+                if load_case_id not in target_lc_ids:
+                    continue
+                eids_s   = stress_result.element_node[:, 0].astype(int)
+                sdata    = stress_result.data[0]  # (ntotal,8): [fd,oxx,oyy,txy,angle,omax,omin,vm]
+                load_ids = stress_result.loadIDs[0]
+                eid_to_sidx = {}
+                for i, eid in enumerate(eids_s):
+                    eid_to_sidx.setdefault(int(eid), []).append(i)
+                for element_id, pid in elements_with_properties.items():
+                    if element_id not in eid_to_sidx:
+                        continue
+                    idxs = eid_to_sidx[element_id]
+                    if len(idxs) < 2:
+                        continue
+                    z1   = sdata[idxs[0]]
+                    z2   = sdata[idxs[1]]
+                    area = element_areas.get(element_id, 0.0)
+                    ps   = property_stress[load_case_id][pid]
+                    ps['sx1']  += z1[1]*area; ps['sy1']  += z1[2]*area; ps['sxy1'] += z1[3]*area
+                    ps['vm1']  += z1[7]*area; ps['p1_1'] += z1[5]*area; ps['p2_1'] += z1[6]*area
+                    ps['sx2']  += z2[1]*area; ps['sy2']  += z2[2]*area; ps['sxy2'] += z2[3]*area
+                    ps['vm2']  += z2[7]*area; ps['p1_2'] += z2[5]*area; ps['p2_2'] += z2[6]*area
+                    element_stress_data.append({
+                        'Property ID': pid,
+                        'Element ID':  element_id,
+                        'Load Case ID': load_ids,
+                        'Sx_Z1':  z1[1], 'Sy_Z1':  z1[2], 'Sxy_Z1': z1[3],
+                        'VM_Z1':  z1[7], 'P1_Z1':  z1[5], 'P2_Z1':  z1[6],
+                        'Sx_Z2':  z2[1], 'Sy_Z2':  z2[2], 'Sxy_Z2': z2[3],
+                        'VM_Z2':  z2[7], 'P1_Z2':  z2[5], 'P2_Z2':  z2[6],
+                    })
+
+        if element_stress_data:
+            df_stress = pd.DataFrame(element_stress_data)
+            df_stress.to_csv(os.path.join(self.stress_output_now2, 'Element_Stress.csv'), index=False)
+            self.logger.info(f"✓ Element_Stress.csv yazıldı ({len(df_stress)} satır)")
+
+            average_stress_data = []
+            for lc in target_lc_ids:
+                if lc not in property_stress:
+                    continue
+                for pid in target_property_ids:
+                    ta = property_areas.get(pid, 0.0)
+                    if ta == 0.0:
+                        continue
+                    ps = property_stress[lc][pid]
+                    average_stress_data.append({
+                        'Property ID':  pid,
+                        'Load Case ID': lc,
+                        'Avg_Sx_Z1':  ps['sx1']/ta,  'Avg_Sy_Z1':  ps['sy1']/ta,  'Avg_Sxy_Z1': ps['sxy1']/ta,
+                        'Avg_VM_Z1':  ps['vm1']/ta,  'Avg_P1_Z1':  ps['p1_1']/ta, 'Avg_P2_Z1':  ps['p2_1']/ta,
+                        'Avg_Sx_Z2':  ps['sx2']/ta,  'Avg_Sy_Z2':  ps['sy2']/ta,  'Avg_Sxy_Z2': ps['sxy2']/ta,
+                        'Avg_VM_Z2':  ps['vm2']/ta,  'Avg_P1_Z2':  ps['p1_2']/ta, 'Avg_P2_Z2':  ps['p2_2']/ta,
+                    })
+
+            df_avg_stress = pd.DataFrame(average_stress_data)
+            df_avg_stress.to_csv(os.path.join(self.stress_output_now2, 'Average_Stress.csv'), index=False)
+            self.logger.info(f"✓ Average_Stress.csv yazıldı ({len(df_avg_stress)} satır)")
+
+            self.logger.info("🔄 Element stress reduction hesaplanıyor (max VM)...")
+            critical_stress_elem = extract_critical_stress(element_stress_data, 'Element ID')
+            reduced_stress_elem = [{
+                'Property ID':  r['Property ID'],
+                'Element ID':   r['Element ID'],
+                'Load Case ID': r['Load Case ID'],
+                'Sx_Z1':  r['Sx_Z1'],  'Sy_Z1':  r['Sy_Z1'],  'Sxy_Z1': r['Sxy_Z1'],
+                'VM_Z1':  r['VM_Z1'],  'P1_Z1':  r['P1_Z1'],  'P2_Z1':  r['P2_Z1'],
+                'Sx_Z2':  r['Sx_Z2'],  'Sy_Z2':  r['Sy_Z2'],  'Sxy_Z2': r['Sxy_Z2'],
+                'VM_Z2':  r['VM_Z2'],  'P1_Z2':  r['P1_Z2'],  'P2_Z2':  r['P2_Z2'],
+            } for r in critical_stress_elem]
+            df_stress_reduced = pd.DataFrame(reduced_stress_elem)
+            df_stress_reduced.to_csv(os.path.join(self.stress_output_now2, 'Element_Stress_Reduced.csv'), index=False)
+            self.logger.info(f"✓ Element_Stress_Reduced.csv yazıldı ({len(df_stress_reduced)} kritik satır)")
+
+            self.logger.info("🔄 Average stress reduction hesaplanıyor (max VM)...")
+            critical_stress_avg = extract_critical_stress(average_stress_data, 'Property ID')
+            reduced_stress_avg = [{
+                'Property ID':  r['Property ID'],
+                'Load Case ID': r['Load Case ID'],
+                'Avg_Sx_Z1':  r['Avg_Sx_Z1'],  'Avg_Sy_Z1':  r['Avg_Sy_Z1'],  'Avg_Sxy_Z1': r['Avg_Sxy_Z1'],
+                'Avg_VM_Z1':  r['Avg_VM_Z1'],  'Avg_P1_Z1':  r['Avg_P1_Z1'],  'Avg_P2_Z1':  r['Avg_P2_Z1'],
+                'Avg_Sx_Z2':  r['Avg_Sx_Z2'],  'Avg_Sy_Z2':  r['Avg_Sy_Z2'],  'Avg_Sxy_Z2': r['Avg_Sxy_Z2'],
+                'Avg_VM_Z2':  r['Avg_VM_Z2'],  'Avg_P1_Z2':  r['Avg_P1_Z2'],  'Avg_P2_Z2':  r['Avg_P2_Z2'],
+            } for r in critical_stress_avg]
+            df_avg_stress_reduced = pd.DataFrame(reduced_stress_avg)
+            df_avg_stress_reduced.to_csv(os.path.join(self.stress_output_now2, 'Average_Stress_Reduced.csv'), index=False)
+            self.logger.info(f"✓ Average_Stress_Reduced.csv yazıldı ({len(df_avg_stress_reduced)} kritik satır)")
+        else:
+            self.logger.info("⚠ Stress verisi bulunamadı (OP2'de STRESS output yok)")
 
     # ─────────────────────────────────────────────────────────────────────────
     # BUSH EXTRACTION
