@@ -141,6 +141,26 @@ def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
     result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
     return result
 
+def extract_critical_displacement(disp_data):
+    """Per (Property ID, Node ID) select load case with max Magnitude."""
+    enriched  = {}
+    group_lcs = {}
+    for row in disp_data:
+        gid = (row['Property ID'], row['Node ID'])
+        lc  = row['Load Case ID']
+        key = (gid, lc)
+        if key in enriched:
+            continue
+        r = {**row, '_mag': float(row['Magnitude']), '_selected': False}
+        enriched[key] = r
+        group_lcs.setdefault(gid, []).append(r)
+    for rows in group_lcs.values():
+        max(rows, key=lambda r: r['_mag'])['_selected'] = True
+    result = [r for r in enriched.values() if r['_selected']]
+    result.sort(key=lambda r: (r['Property ID'], r['Node ID'], r['Load Case ID']))
+    return result
+
+
 def extract_critical_stress(stress_data, group_key):
     vm_z1_key = 'VM_Z1'  if group_key == 'Element ID' else 'Avg_VM_Z1'
     vm_z2_key = 'VM_Z2'  if group_key == 'Element ID' else 'Avg_VM_Z2'
@@ -243,7 +263,7 @@ class LoadExtractionApp:
         bar.pack(fill='x')
         tk.Frame(bar, bg=self.COLORS['border'], height=1).pack(fill='x', side='bottom')
         self.tab_btns = {}
-        for mode in ['PSHELL ALL AVERAGE', 'BUSH LOAD']:
+        for mode in ['PSHELL ALL AVERAGE', 'BUSH LOAD', 'DISPLACEMENT']:
             b = tk.Button(bar, text=f'  {mode}  ',
                          command=lambda m=mode: self._select_tab(m),
                          font=('Segoe UI', 10, 'bold'),
@@ -336,6 +356,15 @@ class LoadExtractionApp:
         self.bush_loadcase_id_entry = self._param_entry(
             self.bush_pf, '⏱  Load Cases', 'Enter ALL or 1,2,3')
 
+        # DISPLACEMENT parameter panel
+        self.disp_pf = tk.Frame(right, bg=self.COLORS['bg'])
+
+        self.disp_prop_entry = self._param_entry(
+            self.disp_pf, '📋  Property IDs', 'Enter ALL or 123,456,789')
+
+        self.disp_lc_entry = self._param_entry(
+            self.disp_pf, '⏱  Load Cases', 'Enter ALL or 1,2,3')
+
     # ─────────────────────────────────────────────────────────────────────────
     # UI HELPERS
     # ─────────────────────────────────────────────────────────────────────────
@@ -404,10 +433,13 @@ class LoadExtractionApp:
                 fg=self.COLORS['accent'] if active else self.COLORS['muted'])
         self.pshell_pf.pack_forget()
         self.bush_pf.pack_forget()
+        self.disp_pf.pack_forget()
         if mode == 'PSHELL ALL AVERAGE':
             self.pshell_pf.pack(fill='both', expand=True)
-        else:
+        elif mode == 'BUSH LOAD':
             self.bush_pf.pack(fill='both', expand=True)
+        else:
+            self.disp_pf.pack(fill='both', expand=True)
 
     def on_mode_change(self):
         self._select_tab(self.extraction_type.get())
@@ -508,8 +540,10 @@ class LoadExtractionApp:
 
         if self.extraction_type.get() == "PSHELL ALL AVERAGE":
             self.run_pshell()
-        else:
+        elif self.extraction_type.get() == "BUSH LOAD":
             self.run_bush()
+        else:
+            self.run_displacement()
 
         elapsed = time.time() - start_time
         self.logger.info("="*60)
@@ -807,6 +841,87 @@ class LoadExtractionApp:
             self.logger.info(f"✓ Average_Stress_Reduced.csv yazıldı ({len(df_avg_stress_reduced)} kritik satır)")
         else:
             self.logger.info("⚠ Stress verisi bulunamadı (OP2'de STRESS output yok)")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DISPLACEMENT EXTRACTION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def run_displacement(self):
+        self.logger.info("📂 BDF ve OP2 dosyaları okunuyor...")
+        op2 = OP2()
+        bdf = BDF()
+        op2.read_op2(self.output_entry_now)
+        self.logger.info("✓ OP2 dosyası okundu")
+        bdf.read_bdf(self.input_entry_now, encoding='latin1')
+        self.logger.info("✓ BDF dosyası okundu")
+
+        prop_str = self.disp_prop_entry.get().strip()
+        all_pids = {e.pid for e in bdf.elements.values()
+                    if e.type in ('CQUAD4', 'CTRIA3')}
+        target_pids = set(parse_id_input(prop_str, list(all_pids)))
+        if not target_pids:
+            target_pids = all_pids
+        self.logger.info(f"✓ {len(target_pids)} property ID seçildi")
+
+        pid_to_nodes = {}
+        for elem in bdf.elements.values():
+            if elem.type in ('CQUAD4', 'CTRIA3') and elem.pid in target_pids:
+                pid_to_nodes.setdefault(elem.pid, set()).update(elem.node_ids)
+
+        if not op2.displacements:
+            self.logger.error("OP2'de displacement output bulunamadı!")
+            messagebox.showerror("Hata", "OP2'de DISPLACEMENT output yok")
+            return
+
+        all_lc  = list(op2.displacements.keys())
+        lc_str  = self.disp_lc_entry.get().strip()
+        target_lc = set(parse_id_input(lc_str, all_lc))
+        if not target_lc:
+            target_lc = set(all_lc)
+        self.logger.info(f"✓ {len(target_lc)} load case seçildi")
+
+        self.logger.info("🔄 Displacement verileri işleniyor...")
+        disp_data = []
+        for lc_id, disp_result in op2.displacements.items():
+            if lc_id not in target_lc:
+                continue
+            node_ids  = disp_result.node_gridtype[:, 0]
+            data      = disp_result.data[0]
+            lc_name   = disp_result.loadIDs[0]
+            nid_to_idx = {int(n): i for i, n in enumerate(node_ids)}
+            for pid, nodes in pid_to_nodes.items():
+                for nid in nodes:
+                    idx = nid_to_idx.get(nid)
+                    if idx is None:
+                        continue
+                    x, y, z   = float(data[idx][0]), float(data[idx][1]), float(data[idx][2])
+                    rx, ry, rz = float(data[idx][3]), float(data[idx][4]), float(data[idx][5])
+                    disp_data.append({
+                        'Property ID':  pid,
+                        'Node ID':      nid,
+                        'Load Case ID': lc_name,
+                        'X': x, 'Y': y, 'Z': z,
+                        'Magnitude': math.sqrt(x**2 + y**2 + z**2),
+                        'Rx': rx, 'Ry': ry, 'Rz': rz,
+                    })
+
+        df_all = pd.DataFrame(disp_data)
+        df_all.to_csv(os.path.join(self.stress_output_now2, 'Displacement_All.csv'), index=False)
+        self.logger.info(f"✓ Displacement_All.csv yazıldı ({len(df_all)} satır)")
+
+        self.logger.info("🔄 Displacement reduction hesaplanıyor (max Magnitude per node)...")
+        critical = extract_critical_displacement(disp_data)
+        reduced  = [{
+            'Property ID':  r['Property ID'],
+            'Node ID':      r['Node ID'],
+            'Load Case ID': r['Load Case ID'],
+            'X': r['X'], 'Y': r['Y'], 'Z': r['Z'],
+            'Magnitude': r['Magnitude'],
+            'Rx': r['Rx'], 'Ry': r['Ry'], 'Rz': r['Rz'],
+        } for r in critical]
+        df_red = pd.DataFrame(reduced)
+        df_red.to_csv(os.path.join(self.stress_output_now2, 'Displacement_Reduced.csv'), index=False)
+        self.logger.info(f"✓ Displacement_Reduced.csv yazıldı ({len(df_red)} kritik satır)")
 
     # ─────────────────────────────────────────────────────────────────────────
     # BUSH EXTRACTION
