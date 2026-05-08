@@ -647,9 +647,8 @@ class LoadExtractionApp:
             q4 = ef['QUAD4']
             q4_dom = np.array(q4['DOMAIN_ID'])
             q4_eid = np.array(q4['EID'])
-            q4_MX  = np.array(q4['MX'])
-            q4_MY  = np.array(q4['MY'])
-            q4_MXY = np.array(q4['MXY'])
+            q4_MX  = np.array(q4['MX']);  q4_MY  = np.array(q4['MY']);  q4_MXY = np.array(q4['MXY'])
+            q4_BMX = np.array(q4['BMX']); q4_BMY = np.array(q4['BMY']); q4_BMXY = np.array(q4['BMXY'])
 
             # CTRIA3  (may not exist in every H5)
             has_tria3 = 'TRIA3' in ef
@@ -657,12 +656,12 @@ class LoadExtractionApp:
                 t3 = ef['TRIA3']
                 t3_dom = np.array(t3['DOMAIN_ID'])
                 t3_eid = np.array(t3['EID'])
-                t3_MX  = np.array(t3['MX'])
-                t3_MY  = np.array(t3['MY'])
-                t3_MXY = np.array(t3['MXY'])
+                t3_MX  = np.array(t3['MX']);  t3_MY  = np.array(t3['MY']);  t3_MXY = np.array(t3['MXY'])
+                t3_BMX = np.array(t3['BMX']); t3_BMY = np.array(t3['BMY']); t3_BMXY = np.array(t3['BMXY'])
             else:
                 self.logger.info('ℹ️  H5 içinde TRIA3 verisi bulunamadı, atlanıyor')
-                t3_dom = t3_eid = t3_MX = t3_MY = t3_MXY = np.array([])
+                t3_dom = t3_eid = np.array([])
+                t3_MX = t3_MY = t3_MXY = t3_BMX = t3_BMY = t3_BMXY = np.array([])
         self.logger.info('✓ H5 dosyası okundu')
 
         # ── Load case filter ──────────────────────────────────────────────
@@ -678,6 +677,12 @@ class LoadExtractionApp:
         }
         element_areas  = {}
         property_areas = {}
+        property_thickness = {}
+        for pid in target_pids:
+            try:
+                property_thickness[pid] = float(bdf.properties[pid].t)
+            except Exception:
+                property_thickness[pid] = 0.0
         for eid, elem in bdf.elements.items():
             if elem.type in ('CQUAD4', 'CTRIA3') and elem.pid in target_pids:
                 area = elem.Area()
@@ -690,13 +695,13 @@ class LoadExtractionApp:
         property_forces   = {}
 
         sources = [
-            ('CQUAD4', q4_dom, q4_eid, q4_MX, q4_MY, q4_MXY),
+            ('CQUAD4', q4_dom, q4_eid, q4_MX, q4_MY, q4_MXY, q4_BMX, q4_BMY, q4_BMXY),
         ]
         if has_tria3:
-            sources.append(('CTRIA3', t3_dom, t3_eid, t3_MX, t3_MY, t3_MXY))
+            sources.append(('CTRIA3', t3_dom, t3_eid, t3_MX, t3_MY, t3_MXY, t3_BMX, t3_BMY, t3_BMXY))
 
         self.logger.info('🔄 Element forces işleniyor (CQUAD4 + CTRIA3)...')
-        for etype, dom_arr, eid_arr, MX_arr, MY_arr, MXY_arr in sources:
+        for etype, dom_arr, eid_arr, MX_arr, MY_arr, MXY_arr, BMX_arr, BMY_arr, BMXY_arr in sources:
             for lc_did in np.unique(dom_arr):
                 if int(lc_did) not in target_dids:
                     continue
@@ -706,16 +711,20 @@ class LoadExtractionApp:
                 lc_MX    = MX_arr[lc_mask].copy()
                 lc_MY    = MY_arr[lc_mask].copy()
                 lc_MXY   = MXY_arr[lc_mask].copy()
+                lc_BMX   = BMX_arr[lc_mask].copy()
+                lc_BMY   = BMY_arr[lc_mask].copy()
+                lc_BMXY  = BMXY_arr[lc_mask].copy()
 
                 if is_material and thetarad_map:
                     thetas = np.array([thetarad_map.get(int(e), 0.0) for e in lc_eids])
-                    lc_MX, lc_MY, lc_MXY = transf_Mohr(lc_MX, lc_MY, lc_MXY, thetas)
+                    lc_MX,  lc_MY,  lc_MXY  = transf_Mohr(lc_MX,  lc_MY,  lc_MXY,  thetas)
+                    lc_BMX, lc_BMY, lc_BMXY = transf_Mohr(lc_BMX, lc_BMY, lc_BMXY, thetas)
 
                 lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
                 eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
 
                 pf = property_forces.setdefault(lc_did, {
-                    pid: {'Nx': 0.0, 'Ny': 0.0, 'Nxy': 0.0}
+                    pid: {'Nx': 0.0, 'Ny': 0.0, 'Nxy': 0.0, 'Mx': 0.0, 'My': 0.0, 'Mxy': 0.0}
                     for pid in target_pids
                 })
 
@@ -723,24 +732,21 @@ class LoadExtractionApp:
                     idx = eid_to_idx.get(eid)
                     if idx is None:
                         continue
-                    nx   = float(lc_MX[idx])
-                    ny   = float(lc_MY[idx])
-                    nxy  = float(lc_MXY[idx])
+                    nx  = float(lc_MX[idx]);  ny  = float(lc_MY[idx]);  nxy = float(lc_MXY[idx])
+                    mx  = float(lc_BMX[idx]); my  = float(lc_BMY[idx]); mxy = float(lc_BMXY[idx])
                     area = element_areas[eid]
 
-                    pf[pid]['Nx']  += nx  * area
-                    pf[pid]['Ny']  += ny  * area
-                    pf[pid]['Nxy'] += nxy * area
+                    pf[pid]['Nx'] += nx*area;  pf[pid]['Ny'] += ny*area;  pf[pid]['Nxy'] += nxy*area
+                    pf[pid]['Mx'] += mx*area;  pf[pid]['My'] += my*area;  pf[pid]['Mxy'] += mxy*area
 
                     element_base_data.append({
-                        'Property ID':   pid,
-                        'Element ID':    eid,
-                        'Element Type':  etype,
-                        'Load Case ID':  lc_name,
-                        'Nx':  nx,
-                        'Ny':  ny,
-                        'Nxy': nxy,
-                        'Area': area,
+                        'Property ID':  pid,
+                        'Element ID':   eid,
+                        'Element Type': etype,
+                        'Load Case ID': lc_name,
+                        'Nx': nx, 'Ny': ny, 'Nxy': nxy,
+                        'Mx': mx, 'My': my, 'Mxy': mxy,
+                        'Thickness': property_thickness[pid],
                     })
 
         # ── Element_Load.csv ──────────────────────────────────────────────
@@ -758,8 +764,9 @@ class LoadExtractionApp:
             'Element ID':   r['Element ID'],
             'Element Type': r['Element Type'],
             'Load Case ID': r['Load Case ID'],
-            'Nx':  r['_nx'], 'Ny': r['_ny'], 'Nxy': r['_nxy'],
-            'Area': r['Area'],
+            'Nx': r['_nx'], 'Ny': r['_ny'], 'Nxy': r['_nxy'],
+            'Mx': r['Mx'],  'My': r['My'],  'Mxy': r['Mxy'],
+            'Thickness': r['Thickness'],
         } for r in critical_elem]
         df_elem_red = pd.DataFrame(reduced_elem)
         p = os.path.join(self.output_dir, 'Element_Load_Reduced.csv')
@@ -775,10 +782,13 @@ class LoadExtractionApp:
                 average_data.append({
                     'Property ID':  pid,
                     'Load Case ID': lc_name,
-                    'Average Nx':   forces['Nx']  / total_area,
-                    'Average Ny':   forces['Ny']  / total_area,
-                    'Average Nxy':  forces['Nxy'] / total_area,
-                    'Average Area': total_area,
+                    'Average Nx':  forces['Nx']  / total_area,
+                    'Average Ny':  forces['Ny']  / total_area,
+                    'Average Nxy': forces['Nxy'] / total_area,
+                    'Average Mx':  forces['Mx']  / total_area,
+                    'Average My':  forces['My']  / total_area,
+                    'Average Mxy': forces['Mxy'] / total_area,
+                    'Thickness':   property_thickness[pid],
                 })
         df_avg = pd.DataFrame(average_data)
         p = os.path.join(self.output_dir, 'Average_Load.csv')
@@ -792,10 +802,11 @@ class LoadExtractionApp:
         reduced_avg = [{
             'Property ID':  r['Property ID'],
             'Load Case ID': r['Load Case ID'],
-            'Average Nx':   r['_nx'],
-            'Average Ny':   r['_ny'],
-            'Average Nxy':  r['_nxy'],
-            'Average Area': r['Average Area'],
+            'Average Nx':  r['_nx'], 'Average Ny':  r['_ny'], 'Average Nxy': r['_nxy'],
+            'Average Mx':  r['Average Mx'],
+            'Average My':  r['Average My'],
+            'Average Mxy': r['Average Mxy'],
+            'Thickness':   r['Thickness'],
         } for r in critical_avg]
         df_avg_red = pd.DataFrame(reduced_avg)
         p = os.path.join(self.output_dir, 'Average_Load_Reduced.csv')

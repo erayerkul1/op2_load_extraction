@@ -538,7 +538,7 @@ class LoadExtractionApp:
 
         property_forces = {
             load_case_id: {
-                pid:{'Nx':0.0, 'Ny':0.0, 'Nxy':0.0}
+                pid: {'Nx':0.0,'Ny':0.0,'Nxy':0.0,'Mx':0.0,'My':0.0,'Mxy':0.0}
                 for pid in target_property_ids
             }
             for load_case_id in set(op2.cquad4_force.keys()).union(op2.ctria3_force.keys())
@@ -546,6 +546,13 @@ class LoadExtractionApp:
 
         property_areas = {}
         element_areas = {}
+        property_thickness = {}
+
+        for pid in target_property_ids:
+            try:
+                property_thickness[pid] = float(bdf.properties[pid].t)
+            except Exception:
+                property_thickness[pid] = 0.0
 
         for element_id, element in bdf.elements.items():
             if element.pid in target_property_ids:
@@ -574,19 +581,18 @@ class LoadExtractionApp:
             for element_id, element_property_id in elements_with_properties.items():
                 if element_id in element_ids:
                     index = np.where(element_ids == element_id)[0][0]
-                    forces = forces_data[index][:3]
+                    f = forces_data[index]
                     area = element_areas[element_id]
-                    property_forces[load_case_id][element_property_id]['Nx'] += forces[0] * area
-                    property_forces[load_case_id][element_property_id]['Ny'] += forces[1] * area
-                    property_forces[load_case_id][element_property_id]['Nxy'] += forces[2] * area
+                    pf = property_forces[load_case_id][element_property_id]
+                    pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
+                    pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
                     element_base_data.append({
-                        'Property ID':element_property_id,
-                        'Element ID':element_id,
-                        'Load Case ID':load_ids,
-                        'Nx':forces[0],
-                        'Ny':forces[1],
-                        'Nxy':forces[2],
-                        'Area':area
+                        'Property ID': element_property_id,
+                        'Element ID':  element_id,
+                        'Load Case ID': load_ids,
+                        'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
+                        'Mx': f[3], 'My': f[4], 'Mxy': f[5],
+                        'Thickness': property_thickness[element_property_id],
                     })
 
         for load_case_id, element_forces in op2_data.ctria3_force.items():
@@ -598,19 +604,18 @@ class LoadExtractionApp:
             for element_id, element_property_id in elements_with_properties.items():
                 if element_id in element_ids:
                     index = np.where(element_ids == element_id)[0][0]
-                    forces = forces_data[index][:3]
+                    f = forces_data[index]
                     area = element_areas[element_id]
-                    property_forces[load_case_id][element_property_id]['Nx'] += forces[0] * area
-                    property_forces[load_case_id][element_property_id]['Ny'] += forces[1] * area
-                    property_forces[load_case_id][element_property_id]['Nxy'] += forces[2] * area
+                    pf = property_forces[load_case_id][element_property_id]
+                    pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
+                    pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
                     element_base_data.append({
-                        'Property ID':element_property_id,
-                        'Element ID':element_id,
-                        'Load Case ID':load_ids,
-                        'Nx':forces[0],
-                        'Ny':forces[1],
-                        'Nxy':forces[2],
-                        'Area':area
+                        'Property ID': element_property_id,
+                        'Element ID':  element_id,
+                        'Load Case ID': load_ids,
+                        'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
+                        'Mx': f[3], 'My': f[4], 'Mxy': f[5],
+                        'Thickness': property_thickness[element_property_id],
                     })
 
         df = pd.DataFrame(element_base_data)
@@ -624,16 +629,16 @@ class LoadExtractionApp:
                 continue
             for property_id, forces in force_by_property.items():
                 total_area = property_areas[property_id]
-                Average_Nx = forces['Nx'] / total_area
-                Average_Ny = forces['Ny'] / total_area
-                Average_Nxy = forces['Nxy'] / total_area
                 Average_forces.append({
-                    'Property ID':property_id,
-                    'Load Case ID':load_case_id,
-                    'Average Nx':Average_Nx,
-                    'Average Ny':Average_Ny,
-                    'Average_Nxy':Average_Nxy,
-                    'Average_Area':total_area
+                    'Property ID':  property_id,
+                    'Load Case ID': load_case_id,
+                    'Average Nx':  forces['Nx']  / total_area,
+                    'Average Ny':  forces['Ny']  / total_area,
+                    'Average Nxy': forces['Nxy'] / total_area,
+                    'Average Mx':  forces['Mx']  / total_area,
+                    'Average My':  forces['My']  / total_area,
+                    'Average Mxy': forces['Mxy'] / total_area,
+                    'Thickness':   property_thickness[property_id],
                 })
 
         df2 = pd.DataFrame(Average_forces)
@@ -644,13 +649,12 @@ class LoadExtractionApp:
         self.logger.info("🔄 Element reduction hesaplanıyor (16 metrik)...")
         critical_elem = extract_critical_pshell(element_base_data, 'Element ID', 'Nx', 'Ny', 'Nxy')
         reduced_elem = [{
-            'Property ID':r['Property ID'],
-            'Element ID':r['Element ID'],
-            'Load Case ID':r['Load Case ID'],
-            'Nx':r['_nx'],
-            'Ny':r['_ny'],
-            'Nxy':r['_nxy'],
-            'Area':r['Area'],
+            'Property ID':  r['Property ID'],
+            'Element ID':   r['Element ID'],
+            'Load Case ID': r['Load Case ID'],
+            'Nx': r['_nx'], 'Ny': r['_ny'], 'Nxy': r['_nxy'],
+            'Mx': r['Mx'],  'My': r['My'],  'Mxy': r['Mxy'],
+            'Thickness': r['Thickness'],
         } for r in critical_elem]
         df_elem_reduced = pd.DataFrame(reduced_elem)
         output_csv_elem_reduced = os.path.join(self.stress_output_now2, 'Element_Load_Reduced.csv')
@@ -658,14 +662,15 @@ class LoadExtractionApp:
         self.logger.info(f"✓ Element_Load_Reduced.csv yazıldı ({len(df_elem_reduced)} kritik satır)")
 
         self.logger.info("🔄 Average reduction hesaplanıyor (16 metrik)...")
-        critical_avg = extract_critical_pshell(Average_forces, 'Property ID', 'Average Nx', 'Average Ny', 'Average_Nxy')
+        critical_avg = extract_critical_pshell(Average_forces, 'Property ID', 'Average Nx', 'Average Ny', 'Average Nxy')
         reduced_avg = [{
-            'Property ID':r['Property ID'],
-            'Load Case ID':r['Load Case ID'],
-            'Average Nx':r['_nx'],
-            'Average Ny':r['_ny'],
-            'Average_Nxy':r['_nxy'],
-            'Average_Area':r['Average_Area'],
+            'Property ID':  r['Property ID'],
+            'Load Case ID': r['Load Case ID'],
+            'Average Nx':  r['_nx'], 'Average Ny':  r['_ny'], 'Average Nxy': r['_nxy'],
+            'Average Mx':  r['Average Mx'],
+            'Average My':  r['Average My'],
+            'Average Mxy': r['Average Mxy'],
+            'Thickness':   r['Thickness'],
         } for r in critical_avg]
         df_avg_reduced = pd.DataFrame(reduced_avg)
         output_csv_avg_reduced = os.path.join(self.stress_output_now2, 'Average_Load_Reduced.csv')
