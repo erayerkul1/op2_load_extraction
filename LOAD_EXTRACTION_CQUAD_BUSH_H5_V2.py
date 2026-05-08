@@ -131,6 +131,28 @@ def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
     return result
 
 
+def extract_critical_stress(stress_data, group_key):
+    vm_z1_key = 'VM_Z1'     if group_key == 'Element ID' else 'Avg_VM_Z1'
+    vm_z2_key = 'VM_Z2'     if group_key == 'Element ID' else 'Avg_VM_Z2'
+    enriched  = {}
+    group_lcs = {}
+    for row in stress_data:
+        gid = row[group_key]
+        lc  = row['Load Case ID']
+        key = (gid, lc)
+        if key in enriched:
+            continue
+        vm_max = max(abs(float(row.get(vm_z1_key, 0))), abs(float(row.get(vm_z2_key, 0))))
+        r = {**row, '_vm_max': vm_max, '_selected': False}
+        enriched[key] = r
+        group_lcs.setdefault(gid, []).append(r)
+    for rows in group_lcs.values():
+        max(rows, key=lambda r: r['_vm_max'])['_selected'] = True
+    result = [r for r in enriched.values() if r['_selected']]
+    result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
+    return result
+
+
 def parse_id_input(input_str, all_ids=None):
     input_str = input_str.strip().upper()
     if input_str == "ALL":
@@ -662,6 +684,32 @@ class LoadExtractionApp:
                 self.logger.info('ℹ️  H5 içinde TRIA3 verisi bulunamadı, atlanıyor')
                 t3_dom = t3_eid = np.array([])
                 t3_MX = t3_MY = t3_MXY = t3_BMX = t3_BMY = t3_BMXY = np.array([])
+
+            # STRESS QUAD4
+            stress_grp = h5.get('NASTRAN/RESULT/ELEMENTAL/STRESS')
+            has_stress_q4 = stress_grp is not None and 'QUAD4' in stress_grp
+            if has_stress_q4:
+                sq4 = stress_grp['QUAD4']
+                sq4_dom = np.array(sq4['DOMAIN_ID'])
+                sq4_eid = np.array(sq4['EID'])
+                sq4_X1  = np.array(sq4['X1']);  sq4_Y1  = np.array(sq4['Y1']);  sq4_XY1 = np.array(sq4['XY1'])
+                sq4_X2  = np.array(sq4['X2']);  sq4_Y2  = np.array(sq4['Y2']);  sq4_XY2 = np.array(sq4['XY2'])
+            else:
+                sq4_dom = sq4_eid = np.array([])
+                sq4_X1 = sq4_Y1 = sq4_XY1 = sq4_X2 = sq4_Y2 = sq4_XY2 = np.array([])
+
+            # STRESS TRIA3
+            has_stress_t3 = stress_grp is not None and 'TRIA3' in stress_grp
+            if has_stress_t3:
+                st3 = stress_grp['TRIA3']
+                st3_dom = np.array(st3['DOMAIN_ID'])
+                st3_eid = np.array(st3['EID'])
+                st3_X1  = np.array(st3['X1']);  st3_Y1  = np.array(st3['Y1']);  st3_XY1 = np.array(st3['XY1'])
+                st3_X2  = np.array(st3['X2']);  st3_Y2  = np.array(st3['Y2']);  st3_XY2 = np.array(st3['XY2'])
+            else:
+                st3_dom = st3_eid = np.array([])
+                st3_X1 = st3_Y1 = st3_XY1 = st3_X2 = st3_Y2 = st3_XY2 = np.array([])
+
         self.logger.info('✓ H5 dosyası okundu')
 
         # ── Load case filter ──────────────────────────────────────────────
@@ -812,6 +860,138 @@ class LoadExtractionApp:
         p = os.path.join(self.output_dir, 'Average_Load_Reduced.csv')
         df_avg_red.to_csv(p, index=False)
         self.logger.info(f'✓ Average_Load_Reduced.csv yazıldı ({len(df_avg_red)} kritik satır)')
+
+        # ── STRESS SECTION ────────────────────────────────────────────────
+        self.logger.info('🔄 Stress verileri işleniyor...')
+        element_stress_data = []
+        property_stress = {
+            lc_did: {
+                pid: dict(sx1=0.,sy1=0.,sxy1=0.,vm1=0.,p1_1=0.,p2_1=0.,
+                          sx2=0.,sy2=0.,sxy2=0.,vm2=0.,p1_2=0.,p2_2=0.)
+                for pid in target_pids
+            }
+            for lc_did in target_dids
+        }
+
+        stress_sources = []
+        if has_stress_q4:
+            stress_sources.append(('CQUAD4', sq4_dom, sq4_eid,
+                                   sq4_X1, sq4_Y1, sq4_XY1, sq4_X2, sq4_Y2, sq4_XY2))
+        if has_stress_t3:
+            stress_sources.append(('CTRIA3', st3_dom, st3_eid,
+                                   st3_X1, st3_Y1, st3_XY1, st3_X2, st3_Y2, st3_XY2))
+
+        for etype, dom_arr, eid_arr, X1a, Y1a, XY1a, X2a, Y2a, XY2a in stress_sources:
+            for lc_did in np.unique(dom_arr):
+                if int(lc_did) not in target_dids:
+                    continue
+                lc_mask = dom_arr == lc_did
+                lc_eids = eid_arr[lc_mask]
+                lc_X1   = X1a[lc_mask].copy();  lc_Y1  = Y1a[lc_mask].copy();  lc_XY1 = XY1a[lc_mask].copy()
+                lc_X2   = X2a[lc_mask].copy();  lc_Y2  = Y2a[lc_mask].copy();  lc_XY2 = XY2a[lc_mask].copy()
+
+                if is_material and thetarad_map:
+                    thetas = np.array([thetarad_map.get(int(e), 0.0) for e in lc_eids])
+                    lc_X1, lc_Y1, lc_XY1 = transf_Mohr(lc_X1, lc_Y1, lc_XY1, thetas)
+                    lc_X2, lc_Y2, lc_XY2 = transf_Mohr(lc_X2, lc_Y2, lc_XY2, thetas)
+
+                lc_VM1  = np.sqrt(lc_X1**2 - lc_X1*lc_Y1 + lc_Y1**2 + 3*lc_XY1**2)
+                lc_VM2  = np.sqrt(lc_X2**2 - lc_X2*lc_Y2 + lc_Y2**2 + 3*lc_XY2**2)
+                ctr1    = (lc_X1 + lc_Y1) / 2.0
+                R1      = np.sqrt(((lc_X1 - lc_Y1) / 2.0)**2 + lc_XY1**2)
+                lc_P1_1 = ctr1 + R1;  lc_P2_1 = ctr1 - R1
+                ctr2    = (lc_X2 + lc_Y2) / 2.0
+                R2      = np.sqrt(((lc_X2 - lc_Y2) / 2.0)**2 + lc_XY2**2)
+                lc_P1_2 = ctr2 + R2;  lc_P2_2 = ctr2 - R2
+
+                lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
+                eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
+                ps_lc      = property_stress.get(lc_did, {})
+
+                for eid, pid in elem_to_pid.items():
+                    idx = eid_to_idx.get(eid)
+                    if idx is None:
+                        continue
+                    area  = element_areas[eid]
+                    sx1   = float(lc_X1[idx]);   sy1  = float(lc_Y1[idx]);   sxy1 = float(lc_XY1[idx])
+                    vm1   = float(lc_VM1[idx]);  p1_1 = float(lc_P1_1[idx]); p2_1 = float(lc_P2_1[idx])
+                    sx2   = float(lc_X2[idx]);   sy2  = float(lc_Y2[idx]);   sxy2 = float(lc_XY2[idx])
+                    vm2   = float(lc_VM2[idx]);  p1_2 = float(lc_P1_2[idx]); p2_2 = float(lc_P2_2[idx])
+
+                    if pid in ps_lc:
+                        ps = ps_lc[pid]
+                        ps['sx1']  += sx1*area;  ps['sy1']  += sy1*area;  ps['sxy1'] += sxy1*area
+                        ps['vm1']  += vm1*area;  ps['p1_1'] += p1_1*area; ps['p2_1'] += p2_1*area
+                        ps['sx2']  += sx2*area;  ps['sy2']  += sy2*area;  ps['sxy2'] += sxy2*area
+                        ps['vm2']  += vm2*area;  ps['p1_2'] += p1_2*area; ps['p2_2'] += p2_2*area
+
+                    element_stress_data.append({
+                        'Property ID':  pid,
+                        'Element ID':   eid,
+                        'Element Type': etype,
+                        'Load Case ID': lc_name,
+                        'Sx_Z1': sx1,  'Sy_Z1': sy1,  'Sxy_Z1': sxy1,
+                        'VM_Z1': vm1,  'P1_Z1': p1_1, 'P2_Z1': p2_1,
+                        'Sx_Z2': sx2,  'Sy_Z2': sy2,  'Sxy_Z2': sxy2,
+                        'VM_Z2': vm2,  'P1_Z2': p1_2, 'P2_Z2': p2_2,
+                    })
+
+        if element_stress_data:
+            df_stress = pd.DataFrame(element_stress_data)
+            df_stress.to_csv(os.path.join(self.output_dir, 'Element_Stress.csv'), index=False)
+            self.logger.info(f'✓ Element_Stress.csv yazıldı ({len(df_stress)} satır)')
+
+            average_stress_data = []
+            for lc_did, ps_dict in property_stress.items():
+                lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
+                for pid, ps in ps_dict.items():
+                    ta = property_areas.get(pid, 0.0)
+                    if ta == 0.0:
+                        continue
+                    average_stress_data.append({
+                        'Property ID':  pid,
+                        'Load Case ID': lc_name,
+                        'Avg_Sx_Z1':  ps['sx1']/ta,  'Avg_Sy_Z1':  ps['sy1']/ta,  'Avg_Sxy_Z1': ps['sxy1']/ta,
+                        'Avg_VM_Z1':  ps['vm1']/ta,  'Avg_P1_Z1':  ps['p1_1']/ta, 'Avg_P2_Z1':  ps['p2_1']/ta,
+                        'Avg_Sx_Z2':  ps['sx2']/ta,  'Avg_Sy_Z2':  ps['sy2']/ta,  'Avg_Sxy_Z2': ps['sxy2']/ta,
+                        'Avg_VM_Z2':  ps['vm2']/ta,  'Avg_P1_Z2':  ps['p1_2']/ta, 'Avg_P2_Z2':  ps['p2_2']/ta,
+                    })
+
+            df_avg_stress = pd.DataFrame(average_stress_data)
+            df_avg_stress.to_csv(os.path.join(self.output_dir, 'Average_Stress.csv'), index=False)
+            self.logger.info(f'✓ Average_Stress.csv yazıldı ({len(df_avg_stress)} satır)')
+
+            self.logger.info('🔄 Element stress reduction hesaplanıyor (max VM)...')
+            crit_s_elem = extract_critical_stress(element_stress_data, 'Element ID')
+            red_s_elem  = [{
+                'Property ID':  r['Property ID'],
+                'Element ID':   r['Element ID'],
+                'Element Type': r['Element Type'],
+                'Load Case ID': r['Load Case ID'],
+                'Sx_Z1': r['Sx_Z1'], 'Sy_Z1': r['Sy_Z1'], 'Sxy_Z1': r['Sxy_Z1'],
+                'VM_Z1': r['VM_Z1'], 'P1_Z1': r['P1_Z1'], 'P2_Z1': r['P2_Z1'],
+                'Sx_Z2': r['Sx_Z2'], 'Sy_Z2': r['Sy_Z2'], 'Sxy_Z2': r['Sxy_Z2'],
+                'VM_Z2': r['VM_Z2'], 'P1_Z2': r['P1_Z2'], 'P2_Z2': r['P2_Z2'],
+            } for r in crit_s_elem]
+            df_stress_red = pd.DataFrame(red_s_elem)
+            df_stress_red.to_csv(os.path.join(self.output_dir, 'Element_Stress_Reduced.csv'), index=False)
+            self.logger.info(f'✓ Element_Stress_Reduced.csv yazıldı ({len(df_stress_red)} kritik satır)')
+
+            self.logger.info('🔄 Average stress reduction hesaplanıyor (max VM)...')
+            crit_s_avg = extract_critical_stress(average_stress_data, 'Property ID')
+            red_s_avg  = [{
+                'Property ID':  r['Property ID'],
+                'Load Case ID': r['Load Case ID'],
+                'Avg_Sx_Z1': r['Avg_Sx_Z1'], 'Avg_Sy_Z1': r['Avg_Sy_Z1'], 'Avg_Sxy_Z1': r['Avg_Sxy_Z1'],
+                'Avg_VM_Z1': r['Avg_VM_Z1'], 'Avg_P1_Z1': r['Avg_P1_Z1'], 'Avg_P2_Z1': r['Avg_P2_Z1'],
+                'Avg_Sx_Z2': r['Avg_Sx_Z2'], 'Avg_Sy_Z2': r['Avg_Sy_Z2'], 'Avg_Sxy_Z2': r['Avg_Sxy_Z2'],
+                'Avg_VM_Z2': r['Avg_VM_Z2'], 'Avg_P1_Z2': r['Avg_P1_Z2'], 'Avg_P2_Z2': r['Avg_P2_Z2'],
+            } for r in crit_s_avg]
+            df_avg_stress_red = pd.DataFrame(red_s_avg)
+            df_avg_stress_red.to_csv(os.path.join(self.output_dir, 'Average_Stress_Reduced.csv'), index=False)
+            self.logger.info(f'✓ Average_Stress_Reduced.csv yazıldı ({len(df_avg_stress_red)} kritik satır)')
+        else:
+            self.logger.info('⚠ Stress verisi bulunamadı (H5 içinde STRESS output yok)')
 
     # ─────────────────────────────────────────────────────────────────────────
     # BUSH EXTRACTION
