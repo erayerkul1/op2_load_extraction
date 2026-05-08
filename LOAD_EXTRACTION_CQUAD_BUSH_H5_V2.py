@@ -338,8 +338,9 @@ class LoadExtractionApp:
         self.h5_path   = ''
         self.output_dir = ''
 
-        self.extraction_type   = tk.StringVar(value='PSHELL ALL AVERAGE')
-        self.coordinate_system = tk.StringVar(value='Element CID')
+        self.extraction_type     = tk.StringVar(value='PSHELL ALL AVERAGE')
+        self.coordinate_system   = tk.StringVar(value='Element CID')
+        self.stress_coord_system = tk.StringVar(value='Element CID')
 
         self.build_ui()
 
@@ -372,7 +373,7 @@ class LoadExtractionApp:
         bar.pack(fill='x')
         tk.Frame(bar, bg=self.COLORS['border'], height=1).pack(fill='x', side='bottom')
         self.tab_btns = {}
-        for mode in ['PSHELL ALL AVERAGE', 'BUSH LOAD', 'DISPLACEMENT']:
+        for mode in ['PSHELL ALL AVERAGE', 'BUSH LOAD', 'DISPLACEMENT', 'STRESS']:
             b = tk.Button(bar, text=f'  {mode}  ',
                          command=lambda m=mode: self._select_tab(m),
                          font=('Segoe UI', 10, 'bold'),
@@ -477,6 +478,27 @@ class LoadExtractionApp:
         self.disp_lc_entry = self._param_entry(
             self.disp_pf, '⏱  Load Cases', 'Enter ALL or 1,2,3')
 
+        # STRESS parameter panel
+        self.stress_pf = tk.Frame(right, bg=self.COLORS['bg'])
+
+        self.stress_prop_entry = self._param_entry(
+            self.stress_pf, '📋  Property IDs', 'Enter ALL or 123,456,789')
+
+        self.stress_lc_entry = self._param_entry(
+            self.stress_pf, '⏱  Load Cases', 'Enter ALL or 1,2,3')
+
+        stress_coord = self._card(self.stress_pf, '🔄  Coordinate System')
+        stress_coord.pack(fill='x', pady=(8, 0))
+        for opt in ['Element CID', 'Material CID']:
+            tk.Radiobutton(stress_coord, text=f'  {opt}',
+                          variable=self.stress_coord_system, value=opt,
+                          bg=self.COLORS['surface'], fg=self.COLORS['text'],
+                          selectcolor=self.COLORS['accent'],
+                          activebackground=self.COLORS['surface'],
+                          font=('Segoe UI', 10), cursor='hand2'
+                          ).pack(anchor='w', padx=12, pady=4)
+        tk.Frame(stress_coord, height=8, bg=self.COLORS['surface']).pack()
+
     # ─────────────────────────────────────────────────────────────────────────
     # UI HELPERS
     # ─────────────────────────────────────────────────────────────────────────
@@ -546,12 +568,15 @@ class LoadExtractionApp:
         self.pshell_pf.pack_forget()
         self.bush_pf.pack_forget()
         self.disp_pf.pack_forget()
+        self.stress_pf.pack_forget()
         if mode == 'PSHELL ALL AVERAGE':
             self.pshell_pf.pack(fill='both', expand=True)
         elif mode == 'BUSH LOAD':
             self.bush_pf.pack(fill='both', expand=True)
-        else:
+        elif mode == 'DISPLACEMENT':
             self.disp_pf.pack(fill='both', expand=True)
+        else:
+            self.stress_pf.pack(fill='both', expand=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     # FILE BROWSERS
@@ -648,8 +673,10 @@ class LoadExtractionApp:
                 self.run_pshell()
             elif self.extraction_type.get() == 'BUSH LOAD':
                 self.run_bush()
-            else:
+            elif self.extraction_type.get() == 'DISPLACEMENT':
                 self.run_displacement()
+            else:
+                self.run_stress()
         except Exception as e:
             self.logger.error(f'HATA: {e}')
             messagebox.showerror('Hata', str(e))
@@ -718,32 +745,6 @@ class LoadExtractionApp:
                 self.logger.info('ℹ️  H5 içinde TRIA3 verisi bulunamadı, atlanıyor')
                 t3_dom = t3_eid = np.array([])
                 t3_MX = t3_MY = t3_MXY = t3_BMX = t3_BMY = t3_BMXY = np.array([])
-
-            # STRESS QUAD4
-            stress_grp = h5.get('NASTRAN/RESULT/ELEMENTAL/STRESS')
-            has_stress_q4 = stress_grp is not None and 'QUAD4' in stress_grp
-            if has_stress_q4:
-                sq4 = stress_grp['QUAD4']
-                sq4_dom = np.array(sq4['DOMAIN_ID'])
-                sq4_eid = np.array(sq4['EID'])
-                sq4_X1  = np.array(sq4['X1']);  sq4_Y1  = np.array(sq4['Y1']);  sq4_XY1 = np.array(sq4['XY1'])
-                sq4_X2  = np.array(sq4['X2']);  sq4_Y2  = np.array(sq4['Y2']);  sq4_XY2 = np.array(sq4['XY2'])
-            else:
-                sq4_dom = sq4_eid = np.array([])
-                sq4_X1 = sq4_Y1 = sq4_XY1 = sq4_X2 = sq4_Y2 = sq4_XY2 = np.array([])
-
-            # STRESS TRIA3
-            has_stress_t3 = stress_grp is not None and 'TRIA3' in stress_grp
-            if has_stress_t3:
-                st3 = stress_grp['TRIA3']
-                st3_dom = np.array(st3['DOMAIN_ID'])
-                st3_eid = np.array(st3['EID'])
-                st3_X1  = np.array(st3['X1']);  st3_Y1  = np.array(st3['Y1']);  st3_XY1 = np.array(st3['XY1'])
-                st3_X2  = np.array(st3['X2']);  st3_Y2  = np.array(st3['Y2']);  st3_XY2 = np.array(st3['XY2'])
-            else:
-                st3_dom = st3_eid = np.array([])
-                st3_X1 = st3_Y1 = st3_XY1 = st3_X2 = st3_Y2 = st3_XY2 = np.array([])
-
         self.logger.info('✓ H5 dosyası okundu')
 
         # ── Load case filter ──────────────────────────────────────────────
@@ -895,7 +896,74 @@ class LoadExtractionApp:
         df_avg_red.to_csv(p, index=False)
         self.logger.info(f'✓ Average_Load_Reduced.csv yazıldı ({len(df_avg_red)} kritik satır)')
 
-        # ── STRESS SECTION ────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # STRESS EXTRACTION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def run_stress(self):
+        self.logger.info('📂 BDF dosyası okunuyor...')
+        bdf = BDF()
+        bdf.read_bdf(self.bdf_path, encoding='latin1')
+        self.logger.info('✓ BDF dosyası okundu')
+
+        prop_str = self.stress_prop_entry.get().strip()
+        all_pids = {e.pid for e in bdf.elements.values() if e.type in ('CQUAD4', 'CTRIA3')}
+        target_pids = set(parse_id_input(prop_str, list(all_pids)))
+        if not target_pids:
+            target_pids = all_pids
+        self.logger.info(f'✓ {len(target_pids)} property ID seçildi')
+
+        is_material = self.stress_coord_system.get() == 'Material CID'
+        self.logger.info(f'🔄 Koordinat sistemi: {self.stress_coord_system.get()}')
+        thetarad_map = {}
+        if is_material:
+            self.logger.info("🔄 BDF'den material açıları hesaplanıyor...")
+            thetarad_map = compute_thetarad_from_bdf(bdf)
+
+        elem_to_pid = {
+            eid: elem.pid
+            for eid, elem in bdf.elements.items()
+            if elem.type in ('CQUAD4', 'CTRIA3') and elem.pid in target_pids
+        }
+        element_areas  = {}
+        property_areas = {}
+        for eid, elem in bdf.elements.items():
+            if elem.type in ('CQUAD4', 'CTRIA3') and elem.pid in target_pids:
+                area = elem.Area()
+                element_areas[eid]  = area
+                property_areas[elem.pid] = property_areas.get(elem.pid, 0.0) + area
+
+        self.logger.info('📂 H5 dosyası okunuyor...')
+        with h5py.File(self.h5_path, 'r') as h5:
+            domain_to_subcase = self._read_domains(h5)
+            stress_grp = h5.get('NASTRAN/RESULT/ELEMENTAL/STRESS')
+            has_q4 = stress_grp is not None and 'QUAD4' in stress_grp
+            has_t3 = stress_grp is not None and 'TRIA3' in stress_grp
+            if has_q4:
+                sq4 = stress_grp['QUAD4']
+                sq4_dom = np.array(sq4['DOMAIN_ID']); sq4_eid = np.array(sq4['EID'])
+                sq4_X1 = np.array(sq4['X1']); sq4_Y1 = np.array(sq4['Y1']); sq4_XY1 = np.array(sq4['XY1'])
+                sq4_X2 = np.array(sq4['X2']); sq4_Y2 = np.array(sq4['Y2']); sq4_XY2 = np.array(sq4['XY2'])
+            else:
+                sq4_dom = sq4_eid = np.array([])
+                sq4_X1 = sq4_Y1 = sq4_XY1 = sq4_X2 = sq4_Y2 = sq4_XY2 = np.array([])
+            if has_t3:
+                st3 = stress_grp['TRIA3']
+                st3_dom = np.array(st3['DOMAIN_ID']); st3_eid = np.array(st3['EID'])
+                st3_X1 = np.array(st3['X1']); st3_Y1 = np.array(st3['Y1']); st3_XY1 = np.array(st3['XY1'])
+                st3_X2 = np.array(st3['X2']); st3_Y2 = np.array(st3['Y2']); st3_XY2 = np.array(st3['XY2'])
+            else:
+                st3_dom = st3_eid = np.array([])
+                st3_X1 = st3_Y1 = st3_XY1 = st3_X2 = st3_Y2 = st3_XY2 = np.array([])
+        self.logger.info('✓ H5 dosyası okundu')
+
+        if not has_q4 and not has_t3:
+            self.logger.info('⚠ Stress verisi bulunamadı (H5 içinde STRESS output yok)')
+            return
+
+        target_dids, target_sc = self._target_domains(domain_to_subcase, self.stress_lc_entry)
+        self.logger.info(f'✓ {len(target_sc)} load case seçildi')
+
         self.logger.info('🔄 Stress verileri işleniyor...')
         element_stress_data = []
         property_stress = {
@@ -908,12 +976,10 @@ class LoadExtractionApp:
         }
 
         stress_sources = []
-        if has_stress_q4:
-            stress_sources.append(('CQUAD4', sq4_dom, sq4_eid,
-                                   sq4_X1, sq4_Y1, sq4_XY1, sq4_X2, sq4_Y2, sq4_XY2))
-        if has_stress_t3:
-            stress_sources.append(('CTRIA3', st3_dom, st3_eid,
-                                   st3_X1, st3_Y1, st3_XY1, st3_X2, st3_Y2, st3_XY2))
+        if has_q4:
+            stress_sources.append(('CQUAD4', sq4_dom, sq4_eid, sq4_X1, sq4_Y1, sq4_XY1, sq4_X2, sq4_Y2, sq4_XY2))
+        if has_t3:
+            stress_sources.append(('CTRIA3', st3_dom, st3_eid, st3_X1, st3_Y1, st3_XY1, st3_X2, st3_Y2, st3_XY2))
 
         for etype, dom_arr, eid_arr, X1a, Y1a, XY1a, X2a, Y2a, XY2a in stress_sources:
             for lc_did in np.unique(dom_arr):
@@ -921,14 +987,12 @@ class LoadExtractionApp:
                     continue
                 lc_mask = dom_arr == lc_did
                 lc_eids = eid_arr[lc_mask]
-                lc_X1   = X1a[lc_mask].copy();  lc_Y1  = Y1a[lc_mask].copy();  lc_XY1 = XY1a[lc_mask].copy()
-                lc_X2   = X2a[lc_mask].copy();  lc_Y2  = Y2a[lc_mask].copy();  lc_XY2 = XY2a[lc_mask].copy()
-
+                lc_X1 = X1a[lc_mask].copy(); lc_Y1 = Y1a[lc_mask].copy(); lc_XY1 = XY1a[lc_mask].copy()
+                lc_X2 = X2a[lc_mask].copy(); lc_Y2 = Y2a[lc_mask].copy(); lc_XY2 = XY2a[lc_mask].copy()
                 if is_material and thetarad_map:
                     thetas = np.array([thetarad_map.get(int(e), 0.0) for e in lc_eids])
                     lc_X1, lc_Y1, lc_XY1 = transf_Mohr(lc_X1, lc_Y1, lc_XY1, thetas)
                     lc_X2, lc_Y2, lc_XY2 = transf_Mohr(lc_X2, lc_Y2, lc_XY2, thetas)
-
                 lc_VM1  = np.sqrt(lc_X1**2 - lc_X1*lc_Y1 + lc_Y1**2 + 3*lc_XY1**2)
                 lc_VM2  = np.sqrt(lc_X2**2 - lc_X2*lc_Y2 + lc_Y2**2 + 3*lc_XY2**2)
                 ctr1    = (lc_X1 + lc_Y1) / 2.0
@@ -937,95 +1001,76 @@ class LoadExtractionApp:
                 ctr2    = (lc_X2 + lc_Y2) / 2.0
                 R2      = np.sqrt(((lc_X2 - lc_Y2) / 2.0)**2 + lc_XY2**2)
                 lc_P1_2 = ctr2 + R2;  lc_P2_2 = ctr2 - R2
-
                 lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
                 eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
                 ps_lc      = property_stress.get(lc_did, {})
-
                 for eid, pid in elem_to_pid.items():
                     idx = eid_to_idx.get(eid)
                     if idx is None:
                         continue
                     area  = element_areas[eid]
-                    sx1   = float(lc_X1[idx]);   sy1  = float(lc_Y1[idx]);   sxy1 = float(lc_XY1[idx])
-                    vm1   = float(lc_VM1[idx]);  p1_1 = float(lc_P1_1[idx]); p2_1 = float(lc_P2_1[idx])
-                    sx2   = float(lc_X2[idx]);   sy2  = float(lc_Y2[idx]);   sxy2 = float(lc_XY2[idx])
-                    vm2   = float(lc_VM2[idx]);  p1_2 = float(lc_P1_2[idx]); p2_2 = float(lc_P2_2[idx])
-
+                    sx1   = float(lc_X1[idx]);  sy1  = float(lc_Y1[idx]);  sxy1 = float(lc_XY1[idx])
+                    vm1   = float(lc_VM1[idx]); p1_1 = float(lc_P1_1[idx]); p2_1 = float(lc_P2_1[idx])
+                    sx2   = float(lc_X2[idx]);  sy2  = float(lc_Y2[idx]);  sxy2 = float(lc_XY2[idx])
+                    vm2   = float(lc_VM2[idx]); p1_2 = float(lc_P1_2[idx]); p2_2 = float(lc_P2_2[idx])
                     if pid in ps_lc:
                         ps = ps_lc[pid]
                         ps['sx1']  += sx1*area;  ps['sy1']  += sy1*area;  ps['sxy1'] += sxy1*area
                         ps['vm1']  += vm1*area;  ps['p1_1'] += p1_1*area; ps['p2_1'] += p2_1*area
                         ps['sx2']  += sx2*area;  ps['sy2']  += sy2*area;  ps['sxy2'] += sxy2*area
                         ps['vm2']  += vm2*area;  ps['p1_2'] += p1_2*area; ps['p2_2'] += p2_2*area
-
                     element_stress_data.append({
-                        'Property ID':  pid,
-                        'Element ID':   eid,
-                        'Element Type': etype,
-                        'Load Case ID': lc_name,
-                        'Sx_Z1': sx1,  'Sy_Z1': sy1,  'Sxy_Z1': sxy1,
-                        'VM_Z1': vm1,  'P1_Z1': p1_1, 'P2_Z1': p2_1,
-                        'Sx_Z2': sx2,  'Sy_Z2': sy2,  'Sxy_Z2': sxy2,
-                        'VM_Z2': vm2,  'P1_Z2': p1_2, 'P2_Z2': p2_2,
+                        'Property ID': pid, 'Element ID': eid, 'Element Type': etype, 'Load Case ID': lc_name,
+                        'Sx_Z1': sx1, 'Sy_Z1': sy1, 'Sxy_Z1': sxy1, 'VM_Z1': vm1, 'P1_Z1': p1_1, 'P2_Z1': p2_1,
+                        'Sx_Z2': sx2, 'Sy_Z2': sy2, 'Sxy_Z2': sxy2, 'VM_Z2': vm2, 'P1_Z2': p1_2, 'P2_Z2': p2_2,
                     })
 
-        if element_stress_data:
-            df_stress = pd.DataFrame(element_stress_data)
-            df_stress.to_csv(os.path.join(self.output_dir, 'Element_Stress.csv'), index=False)
-            self.logger.info(f'✓ Element_Stress.csv yazıldı ({len(df_stress)} satır)')
+        if not element_stress_data:
+            self.logger.info('⚠ Seçili elementler için stress verisi bulunamadı')
+            return
 
-            average_stress_data = []
-            for lc_did, ps_dict in property_stress.items():
-                lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
-                for pid, ps in ps_dict.items():
-                    ta = property_areas.get(pid, 0.0)
-                    if ta == 0.0:
-                        continue
-                    average_stress_data.append({
-                        'Property ID':  pid,
-                        'Load Case ID': lc_name,
-                        'Avg_Sx_Z1':  ps['sx1']/ta,  'Avg_Sy_Z1':  ps['sy1']/ta,  'Avg_Sxy_Z1': ps['sxy1']/ta,
-                        'Avg_VM_Z1':  ps['vm1']/ta,  'Avg_P1_Z1':  ps['p1_1']/ta, 'Avg_P2_Z1':  ps['p2_1']/ta,
-                        'Avg_Sx_Z2':  ps['sx2']/ta,  'Avg_Sy_Z2':  ps['sy2']/ta,  'Avg_Sxy_Z2': ps['sxy2']/ta,
-                        'Avg_VM_Z2':  ps['vm2']/ta,  'Avg_P1_Z2':  ps['p1_2']/ta, 'Avg_P2_Z2':  ps['p2_2']/ta,
-                    })
+        df_stress = pd.DataFrame(element_stress_data)
+        df_stress.to_csv(os.path.join(self.output_dir, 'Element_Stress.csv'), index=False)
+        self.logger.info(f'✓ Element_Stress.csv yazıldı ({len(df_stress)} satır)')
 
-            df_avg_stress = pd.DataFrame(average_stress_data)
-            df_avg_stress.to_csv(os.path.join(self.output_dir, 'Average_Stress.csv'), index=False)
-            self.logger.info(f'✓ Average_Stress.csv yazıldı ({len(df_avg_stress)} satır)')
+        average_stress_data = []
+        for lc_did, ps_dict in property_stress.items():
+            lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
+            for pid, ps in ps_dict.items():
+                ta = property_areas.get(pid, 0.0)
+                if ta == 0.0:
+                    continue
+                average_stress_data.append({
+                    'Property ID': pid, 'Load Case ID': lc_name,
+                    'Avg_Sx_Z1': ps['sx1']/ta, 'Avg_Sy_Z1': ps['sy1']/ta, 'Avg_Sxy_Z1': ps['sxy1']/ta,
+                    'Avg_VM_Z1': ps['vm1']/ta, 'Avg_P1_Z1': ps['p1_1']/ta, 'Avg_P2_Z1': ps['p2_1']/ta,
+                    'Avg_Sx_Z2': ps['sx2']/ta, 'Avg_Sy_Z2': ps['sy2']/ta, 'Avg_Sxy_Z2': ps['sxy2']/ta,
+                    'Avg_VM_Z2': ps['vm2']/ta, 'Avg_P1_Z2': ps['p1_2']/ta, 'Avg_P2_Z2': ps['p2_2']/ta,
+                })
 
-            self.logger.info('🔄 Element stress reduction hesaplanıyor (max VM)...')
-            crit_s_elem = extract_critical_stress(element_stress_data, 'Element ID')
-            red_s_elem  = [{
-                'Property ID':  r['Property ID'],
-                'Element ID':   r['Element ID'],
-                'Element Type': r['Element Type'],
-                'Load Case ID': r['Load Case ID'],
-                'Sx_Z1': r['Sx_Z1'], 'Sy_Z1': r['Sy_Z1'], 'Sxy_Z1': r['Sxy_Z1'],
-                'VM_Z1': r['VM_Z1'], 'P1_Z1': r['P1_Z1'], 'P2_Z1': r['P2_Z1'],
-                'Sx_Z2': r['Sx_Z2'], 'Sy_Z2': r['Sy_Z2'], 'Sxy_Z2': r['Sxy_Z2'],
-                'VM_Z2': r['VM_Z2'], 'P1_Z2': r['P1_Z2'], 'P2_Z2': r['P2_Z2'],
-            } for r in crit_s_elem]
-            df_stress_red = pd.DataFrame(red_s_elem)
-            df_stress_red.to_csv(os.path.join(self.output_dir, 'Element_Stress_Reduced.csv'), index=False)
-            self.logger.info(f'✓ Element_Stress_Reduced.csv yazıldı ({len(df_stress_red)} kritik satır)')
+        pd.DataFrame(average_stress_data).to_csv(os.path.join(self.output_dir, 'Average_Stress.csv'), index=False)
+        self.logger.info(f'✓ Average_Stress.csv yazıldı ({len(average_stress_data)} satır)')
 
-            self.logger.info('🔄 Average stress reduction hesaplanıyor (max VM)...')
-            crit_s_avg = extract_critical_stress(average_stress_data, 'Property ID')
-            red_s_avg  = [{
-                'Property ID':  r['Property ID'],
-                'Load Case ID': r['Load Case ID'],
-                'Avg_Sx_Z1': r['Avg_Sx_Z1'], 'Avg_Sy_Z1': r['Avg_Sy_Z1'], 'Avg_Sxy_Z1': r['Avg_Sxy_Z1'],
-                'Avg_VM_Z1': r['Avg_VM_Z1'], 'Avg_P1_Z1': r['Avg_P1_Z1'], 'Avg_P2_Z1': r['Avg_P2_Z1'],
-                'Avg_Sx_Z2': r['Avg_Sx_Z2'], 'Avg_Sy_Z2': r['Avg_Sy_Z2'], 'Avg_Sxy_Z2': r['Avg_Sxy_Z2'],
-                'Avg_VM_Z2': r['Avg_VM_Z2'], 'Avg_P1_Z2': r['Avg_P1_Z2'], 'Avg_P2_Z2': r['Avg_P2_Z2'],
-            } for r in crit_s_avg]
-            df_avg_stress_red = pd.DataFrame(red_s_avg)
-            df_avg_stress_red.to_csv(os.path.join(self.output_dir, 'Average_Stress_Reduced.csv'), index=False)
-            self.logger.info(f'✓ Average_Stress_Reduced.csv yazıldı ({len(df_avg_stress_red)} kritik satır)')
-        else:
-            self.logger.info('⚠ Stress verisi bulunamadı (H5 içinde STRESS output yok)')
+        self.logger.info('🔄 Element stress reduction hesaplanıyor (max VM)...')
+        crit_e = extract_critical_stress(element_stress_data, 'Element ID')
+        red_e  = [{'Property ID': r['Property ID'], 'Element ID': r['Element ID'],
+                   'Element Type': r['Element Type'], 'Load Case ID': r['Load Case ID'],
+                   'Sx_Z1': r['Sx_Z1'], 'Sy_Z1': r['Sy_Z1'], 'Sxy_Z1': r['Sxy_Z1'],
+                   'VM_Z1': r['VM_Z1'], 'P1_Z1': r['P1_Z1'], 'P2_Z1': r['P2_Z1'],
+                   'Sx_Z2': r['Sx_Z2'], 'Sy_Z2': r['Sy_Z2'], 'Sxy_Z2': r['Sxy_Z2'],
+                   'VM_Z2': r['VM_Z2'], 'P1_Z2': r['P1_Z2'], 'P2_Z2': r['P2_Z2']} for r in crit_e]
+        pd.DataFrame(red_e).to_csv(os.path.join(self.output_dir, 'Element_Stress_Reduced.csv'), index=False)
+        self.logger.info(f'✓ Element_Stress_Reduced.csv yazıldı ({len(red_e)} kritik satır)')
+
+        self.logger.info('🔄 Average stress reduction hesaplanıyor (max VM)...')
+        crit_a = extract_critical_stress(average_stress_data, 'Property ID')
+        red_a  = [{'Property ID': r['Property ID'], 'Load Case ID': r['Load Case ID'],
+                   'Avg_Sx_Z1': r['Avg_Sx_Z1'], 'Avg_Sy_Z1': r['Avg_Sy_Z1'], 'Avg_Sxy_Z1': r['Avg_Sxy_Z1'],
+                   'Avg_VM_Z1': r['Avg_VM_Z1'], 'Avg_P1_Z1': r['Avg_P1_Z1'], 'Avg_P2_Z1': r['Avg_P2_Z1'],
+                   'Avg_Sx_Z2': r['Avg_Sx_Z2'], 'Avg_Sy_Z2': r['Avg_Sy_Z2'], 'Avg_Sxy_Z2': r['Avg_Sxy_Z2'],
+                   'Avg_VM_Z2': r['Avg_VM_Z2'], 'Avg_P1_Z2': r['Avg_P1_Z2'], 'Avg_P2_Z2': r['Avg_P2_Z2']} for r in crit_a]
+        pd.DataFrame(red_a).to_csv(os.path.join(self.output_dir, 'Average_Stress_Reduced.csv'), index=False)
+        self.logger.info(f'✓ Average_Stress_Reduced.csv yazıldı ({len(red_a)} kritik satır)')
 
     # ─────────────────────────────────────────────────────────────────────────
     # DISPLACEMENT EXTRACTION
