@@ -18,6 +18,7 @@ import time
 import math
 import logging
 from datetime import datetime
+from collections import defaultdict
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -71,62 +72,97 @@ PSHELL_METRICS = [
 
 def extract_critical_rows(raw_data):
     """18-metric critical load case reduction for BUSH elements."""
-    enriched = {}
-    eid_lcs  = {}
-    for row in raw_data:
-        eid = row["Element ID"]
-        lc  = row["Load Case ID"]
-        key = (eid, lc)
-        if key in enriched:
-            continue
-        try:
-            fx, fy, fz = float(row["FX"]), float(row["FY"]), float(row["FZ"])
-        except (ValueError, TypeError):
-            fx = fy = fz = 0.0
-        vals = {m["id"]: m["fn"](fx, fy, fz) for m in METRICS}
-        r = {**row, "_fx": fx, "_fy": fy, "_fz": fz, "_vals": vals, "_metrics": set()}
-        enriched[key] = r
-        eid_lcs.setdefault(eid, []).append(r)
+    if not raw_data:
+        return []
+    seen = {}
+    for i, row in enumerate(raw_data):
+        key = (row["Element ID"], row["Load Case ID"])
+        if key not in seen:
+            seen[key] = i
+    rows = [raw_data[i] for i in seen.values()]
 
-    for rows in eid_lcs.values():
-        for m in METRICS:
-            mid  = m["id"]
-            best = max(rows, key=lambda r, mid=mid: r["_vals"][mid])
-            best["_metrics"].add(mid)
-
-    result = [r for r in enriched.values() if r["_metrics"]]
+    fx_arr = np.array([float(r["FX"]) for r in rows])
+    fy_arr = np.array([float(r["FY"]) for r in rows])
+    fz_arr = np.array([float(r["FZ"]) for r in rows])
+    abs_fx = np.abs(fx_arr)
+    fy2 = fy_arr**2;  fz2 = fz_arr**2;  fx2 = fx_arr**2
+    fy_fz = np.sqrt(fy2 + fz2)
+    M = np.column_stack([
+        fz_arr, -fz_arr, fy_arr, -fy_arr, fx_arr, -fx_arr,
+        abs_fx, fy_fz,
+        fy_fz + abs_fx,
+        np.sqrt(4*fz2 + fy2),
+        np.sqrt(fz2 + 4*fy2),
+        np.sqrt(4*fz2 + fy2) + abs_fx,
+        np.sqrt(fz2 + 4*fy2) + abs_fx,
+        abs_fx + fy_fz,
+        fx_arr + fy_fz,
+        np.sqrt(4*fx2 + fy2 + fz2),
+        np.sqrt(fx2 + 4*fy2 + 4*fz2),
+        np.sqrt(fx2 + fy2 + fz2),
+    ])
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[r["Element ID"]].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        if len(g_rows) == 1:
+            selected.add(g_rows[0])
+        else:
+            sub = M[g_rows]
+            for lb in np.argmax(sub, axis=0):
+                selected.add(g_rows[lb])
+    result = [{**rows[i], '_fx': float(fx_arr[i]), '_fy': float(fy_arr[i]), '_fz': float(fz_arr[i])}
+              for i in sorted(selected)]
     result.sort(key=lambda r: (r["Element ID"], r["Load Case ID"]))
     return result
 
 
 def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
     """16-metric critical load case reduction for PSHELL elements/properties."""
-    enriched  = {}
-    group_lcs = {}
-    for row in raw_data:
-        gid = row[group_key]
-        lc  = row["Load Case ID"]
-        key = (gid, lc)
-        if key in enriched:
-            continue
-        try:
-            nx  = float(row[nx_key])
-            ny  = float(row[ny_key])
-            nxy = float(row[nxy_key])
-        except (ValueError, TypeError):
-            nx = ny = nxy = 0.0
-        vals = {m["id"]: m["fn"](nx, ny, nxy) for m in PSHELL_METRICS}
-        r = {**row, "_nx": nx, "_ny": ny, "_nxy": nxy, "_vals": vals, "_metrics": set()}
-        enriched[key] = r
-        group_lcs.setdefault(gid, []).append(r)
+    if not raw_data:
+        return []
+    seen = {}
+    for i, row in enumerate(raw_data):
+        key = (row[group_key], row["Load Case ID"])
+        if key not in seen:
+            seen[key] = i
+    rows = [raw_data[i] for i in seen.values()]
 
-    for rows in group_lcs.values():
-        for m in PSHELL_METRICS:
-            mid  = m["id"]
-            best = max(rows, key=lambda r, mid=mid: r["_vals"][mid])
-            best["_metrics"].add(mid)
-
-    result = [r for r in enriched.values() if r["_metrics"]]
+    nx_arr  = np.array([float(r[nx_key])  for r in rows])
+    ny_arr  = np.array([float(r[ny_key])  for r in rows])
+    nxy_arr = np.array([float(r[nxy_key]) for r in rows])
+    abs_nxy = np.abs(nxy_arr)
+    nx2 = nx_arr**2;  ny2 = ny_arr**2
+    nx_ny = np.sqrt(nx2 + ny2)
+    M = np.column_stack([
+        nx_arr, -nx_arr,
+        ny_arr, -ny_arr,
+        nxy_arr, -nxy_arr,
+        nx_ny,
+        nx_ny + abs_nxy,
+        np.sqrt(2*nx2 + 2*ny2),
+        np.sqrt(nx2 + 2*ny2),
+        np.sqrt(2*nx2 + ny2) + 2*abs_nxy,
+        np.sqrt(nx2 + 2*ny2) + 2*abs_nxy,
+        nx_arr + ny_arr + nxy_arr,
+        nx_arr + ny_arr,
+        ny_arr + nxy_arr,
+        nx_arr + nxy_arr,
+    ])
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[r[group_key]].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        if len(g_rows) == 1:
+            selected.add(g_rows[0])
+        else:
+            sub = M[g_rows]
+            for lb in np.argmax(sub, axis=0):
+                selected.add(g_rows[lb])
+    result = [{**rows[i], '_nx': float(nx_arr[i]), '_ny': float(ny_arr[i]), '_nxy': float(nxy_arr[i])}
+              for i in sorted(selected)]
     result.sort(key=lambda r: (r[group_key], r["Load Case ID"]))
     return result
 
@@ -342,11 +378,27 @@ class LoadExtractionApp:
         self.coordinate_system   = tk.StringVar(value='Element CID')
         self.stress_coord_system = tk.StringVar(value='Element CID')
 
+        self._bdf_cache      = None
+        self._bdf_path_cache = None
+
         self.build_ui()
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI BUILD
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _load_bdf(self):
+        path = self.bdf_path
+        if self._bdf_path_cache != path:
+            self.logger.info('📂 BDF dosyası okunuyor...')
+            bdf = BDF()
+            bdf.read_bdf(path, encoding='latin1')
+            self._bdf_cache      = bdf
+            self._bdf_path_cache = path
+            self.logger.info('✓ BDF dosyası okundu')
+        else:
+            self.logger.info('✓ BDF dosyası önbellekten alındı')
+        return self._bdf_cache
 
     def build_ui(self):
         self._build_header()
@@ -698,10 +750,7 @@ class LoadExtractionApp:
         prop_str = self.prop_id_entry.get().strip()
 
         # ── Read BDF ──────────────────────────────────────────────────────
-        self.logger.info('📂 BDF dosyası okunuyor...')
-        bdf = BDF()
-        bdf.read_bdf(self.bdf_path, encoding='latin1')
-        self.logger.info('✓ BDF dosyası okundu')
+        bdf = self._load_bdf()
 
         all_pids = {e.pid for e in bdf.elements.values()
                     if e.type in ('CQUAD4', 'CTRIA3')}
@@ -799,7 +848,7 @@ class LoadExtractionApp:
                 lc_BMXY  = BMXY_arr[lc_mask].copy()
 
                 if is_material and thetarad_map:
-                    thetas = np.array([thetarad_map.get(int(e), 0.0) for e in lc_eids])
+                    thetas = np.array([thetarad_map.get(e, 0.0) for e in lc_eids.tolist()])
                     lc_MX,  lc_MY,  lc_MXY  = transf_Mohr(lc_MX,  lc_MY,  lc_MXY,  thetas)
                     lc_BMX, lc_BMY, lc_BMXY = transf_Mohr(lc_BMX, lc_BMY, lc_BMXY, thetas)
 
@@ -901,10 +950,7 @@ class LoadExtractionApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_stress(self):
-        self.logger.info('📂 BDF dosyası okunuyor...')
-        bdf = BDF()
-        bdf.read_bdf(self.bdf_path, encoding='latin1')
-        self.logger.info('✓ BDF dosyası okundu')
+        bdf = self._load_bdf()
 
         prop_str = self.stress_prop_entry.get().strip()
         all_pids = {e.pid for e in bdf.elements.values() if e.type in ('CQUAD4', 'CTRIA3')}
@@ -990,7 +1036,7 @@ class LoadExtractionApp:
                 lc_X1 = X1a[lc_mask].copy(); lc_Y1 = Y1a[lc_mask].copy(); lc_XY1 = XY1a[lc_mask].copy()
                 lc_X2 = X2a[lc_mask].copy(); lc_Y2 = Y2a[lc_mask].copy(); lc_XY2 = XY2a[lc_mask].copy()
                 if is_material and thetarad_map:
-                    thetas = np.array([thetarad_map.get(int(e), 0.0) for e in lc_eids])
+                    thetas = np.array([thetarad_map.get(e, 0.0) for e in lc_eids.tolist()])
                     lc_X1, lc_Y1, lc_XY1 = transf_Mohr(lc_X1, lc_Y1, lc_XY1, thetas)
                     lc_X2, lc_Y2, lc_XY2 = transf_Mohr(lc_X2, lc_Y2, lc_XY2, thetas)
                 lc_VM1  = np.sqrt(lc_X1**2 - lc_X1*lc_Y1 + lc_Y1**2 + 3*lc_XY1**2)
@@ -1077,10 +1123,7 @@ class LoadExtractionApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_displacement(self):
-        self.logger.info('📂 BDF dosyası okunuyor...')
-        bdf = BDF()
-        bdf.read_bdf(self.bdf_path, encoding='latin1')
-        self.logger.info('✓ BDF dosyası okundu')
+        bdf = self._load_bdf()
 
         prop_str = self.disp_prop_entry.get().strip()
         all_pids = {e.pid for e in bdf.elements.values()
@@ -1108,31 +1151,37 @@ class LoadExtractionApp:
         target_dids, target_sc = self._target_domains(domain_to_subcase, self.disp_lc_entry)
         self.logger.info(f'✓ {len(target_sc)} load case seçildi')
 
+        # Build reverse map once: nid → [pid, ...] for O(1) lookup inside lc loop
+        node_to_pids = defaultdict(list)
+        for pid, nodes in pid_to_nodes.items():
+            for nid in nodes:
+                node_to_pids[int(nid)].append(pid)
+
         self.logger.info('🔄 Displacement verileri işleniyor...')
         disp_data = []
         for lc_did in np.unique(d_dom):
             if int(lc_did) not in target_dids:
                 continue
-            lc_mask    = d_dom == lc_did
-            lc_nids    = d_nid[lc_mask]
-            lc_X       = d_X[lc_mask];  lc_Y  = d_Y[lc_mask];  lc_Z  = d_Z[lc_mask]
-            lc_RX      = d_RX[lc_mask]; lc_RY = d_RY[lc_mask]; lc_RZ = d_RZ[lc_mask]
-            lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
-            nid_to_idx = {int(n): i for i, n in enumerate(lc_nids)}
-
-            for pid, nodes in pid_to_nodes.items():
-                for nid in nodes:
-                    idx = nid_to_idx.get(nid)
-                    if idx is None:
-                        continue
-                    x, y, z   = float(lc_X[idx]),  float(lc_Y[idx]),  float(lc_Z[idx])
-                    rx, ry, rz = float(lc_RX[idx]), float(lc_RY[idx]), float(lc_RZ[idx])
+            lc_mask = d_dom == lc_did
+            lc_nids = d_nid[lc_mask]
+            lc_X    = d_X[lc_mask];  lc_Y  = d_Y[lc_mask];  lc_Z  = d_Z[lc_mask]
+            lc_RX   = d_RX[lc_mask]; lc_RY = d_RY[lc_mask]; lc_RZ = d_RZ[lc_mask]
+            lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
+            # Iterate once over nodes that exist in H5; look up pids from reverse map
+            for idx, nid in enumerate(lc_nids.tolist()):
+                pids = node_to_pids.get(nid)
+                if pids is None:
+                    continue
+                x, y, z   = float(lc_X[idx]),  float(lc_Y[idx]),  float(lc_Z[idx])
+                rx, ry, rz = float(lc_RX[idx]), float(lc_RY[idx]), float(lc_RZ[idx])
+                mag = math.sqrt(x**2 + y**2 + z**2)
+                for pid in pids:
                     disp_data.append({
                         'Property ID':  pid,
                         'Node ID':      nid,
                         'Load Case ID': lc_name,
                         'X': x, 'Y': y, 'Z': z,
-                        'Magnitude': math.sqrt(x**2 + y**2 + z**2),
+                        'Magnitude': mag,
                         'Rx': rx, 'Ry': ry, 'Rz': rz,
                     })
 

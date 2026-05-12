@@ -15,6 +15,7 @@ import time
 import math
 import logging
 from datetime import datetime
+from collections import defaultdict
 from pyNastran.op2.data_in_material_coord import data_in_material_coord
 
 
@@ -84,60 +85,95 @@ class TextHandler(logging.Handler):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def extract_critical_rows(raw_data):
-    enriched = {}
-    eid_lcs  = {}
-    for row in raw_data:
-        eid = row["Element ID"]
-        lc  = row["Load Case ID"]
-        key = (eid, lc)
-        if key in enriched:
-            continue
-        try:
-            fx, fy, fz = float(row["FX"]), float(row["FY"]), float(row["FZ"])
-        except (ValueError, TypeError):
-            fx = fy = fz = 0.0
-        vals = {m["id"]: m["fn"](fx, fy, fz) for m in METRICS}
-        r = {**row, "_fx": fx, "_fy": fy, "_fz": fz, "_vals": vals, "_metrics": set()}
-        enriched[key] = r
-        eid_lcs.setdefault(eid, []).append(r)
+    if not raw_data:
+        return []
+    seen = {}
+    for i, row in enumerate(raw_data):
+        key = (row["Element ID"], row["Load Case ID"])
+        if key not in seen:
+            seen[key] = i
+    rows = [raw_data[i] for i in seen.values()]
 
-    for eid, rows in eid_lcs.items():
-        for m in METRICS:
-            mid = m["id"]
-            best = max(rows, key=lambda r, mid=mid: r["_vals"][mid])
-            best["_metrics"].add(mid)
-
-    result = [r for r in enriched.values() if r["_metrics"]]
+    fx_arr = np.array([float(r["FX"]) for r in rows])
+    fy_arr = np.array([float(r["FY"]) for r in rows])
+    fz_arr = np.array([float(r["FZ"]) for r in rows])
+    abs_fx = np.abs(fx_arr)
+    fy2 = fy_arr**2;  fz2 = fz_arr**2;  fx2 = fx_arr**2
+    fy_fz = np.sqrt(fy2 + fz2)
+    M = np.column_stack([
+        fz_arr, -fz_arr, fy_arr, -fy_arr, fx_arr, -fx_arr,
+        abs_fx, fy_fz,
+        fy_fz + abs_fx,
+        np.sqrt(4*fz2 + fy2),
+        np.sqrt(fz2 + 4*fy2),
+        np.sqrt(4*fz2 + fy2) + abs_fx,
+        np.sqrt(fz2 + 4*fy2) + abs_fx,
+        abs_fx + fy_fz,
+        fx_arr + fy_fz,
+        np.sqrt(4*fx2 + fy2 + fz2),
+        np.sqrt(fx2 + 4*fy2 + 4*fz2),
+        np.sqrt(fx2 + fy2 + fz2),
+    ])
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[r["Element ID"]].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        if len(g_rows) == 1:
+            selected.add(g_rows[0])
+        else:
+            sub = M[g_rows]
+            for lb in np.argmax(sub, axis=0):
+                selected.add(g_rows[lb])
+    result = [{**rows[i], '_fx': float(fx_arr[i]), '_fy': float(fy_arr[i]), '_fz': float(fz_arr[i])}
+              for i in sorted(selected)]
     result.sort(key=lambda r: (r["Element ID"], r["Load Case ID"]))
     return result
 
 def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
-    enriched  = {}
-    group_lcs = {}
-    for row in raw_data:
-        gid = row[group_key]
-        lc  = row['Load Case ID']
-        key = (gid, lc)
-        if key in enriched:
-            continue
-        try:
-            nx  = float(row[nx_key])
-            ny  = float(row[ny_key])
-            nxy = float(row[nxy_key])
-        except (ValueError, TypeError):
-            nx = ny = nxy = 0.0
-        vals = {m["id"]: m["fn"](nx, ny, nxy) for m in PSHELL_METRICS}
-        r = {**row, "_nx": nx, "_ny": ny, "_nxy": nxy, "_vals": vals, "_metrics": set()}
-        enriched[key] = r
-        group_lcs.setdefault(gid, []).append(r)
+    if not raw_data:
+        return []
+    seen = {}
+    for i, row in enumerate(raw_data):
+        key = (row[group_key], row['Load Case ID'])
+        if key not in seen:
+            seen[key] = i
+    rows = [raw_data[i] for i in seen.values()]
 
-    for gid, rows in group_lcs.items():
-        for m in PSHELL_METRICS:
-            mid  = m["id"]
-            best = max(rows, key=lambda r, mid=mid: r["_vals"][mid])
-            best["_metrics"].add(mid)
-
-    result = [r for r in enriched.values() if r["_metrics"]]
+    nx_arr  = np.array([float(r[nx_key])  for r in rows])
+    ny_arr  = np.array([float(r[ny_key])  for r in rows])
+    nxy_arr = np.array([float(r[nxy_key]) for r in rows])
+    abs_nxy = np.abs(nxy_arr)
+    nx2 = nx_arr**2;  ny2 = ny_arr**2
+    nx_ny = np.sqrt(nx2 + ny2)
+    M = np.column_stack([
+        nx_arr, -nx_arr,
+        ny_arr, -ny_arr,
+        nxy_arr, -nxy_arr,
+        nx_ny,
+        nx_ny + abs_nxy,
+        np.sqrt(2*nx2 + 2*ny2),
+        np.sqrt(nx2 + 2*ny2),
+        np.sqrt(2*nx2 + ny2) + 2*abs_nxy,
+        np.sqrt(nx2 + 2*ny2) + 2*abs_nxy,
+        nx_arr + ny_arr + nxy_arr,
+        nx_arr + ny_arr,
+        ny_arr + nxy_arr,
+        nx_arr + nxy_arr,
+    ])
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[r[group_key]].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        if len(g_rows) == 1:
+            selected.add(g_rows[0])
+        else:
+            sub = M[g_rows]
+            for lb in np.argmax(sub, axis=0):
+                selected.add(g_rows[lb])
+    result = [{**rows[i], '_nx': float(nx_arr[i]), '_ny': float(ny_arr[i]), '_nxy': float(nxy_arr[i])}
+              for i in sorted(selected)]
     result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
     return result
 
@@ -233,11 +269,42 @@ class LoadExtractionApp:
         self.coordinate_system = tk.StringVar(value='Element CID')
         self.stress_coord_system = tk.StringVar(value='Element CID')
 
+        self._bdf_cache      = None
+        self._bdf_path_cache = None
+        self._op2_cache      = None
+        self._op2_path_cache = None
+
         self.build_ui()
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI BUILD
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _load_bdf(self):
+        path = self.input_entry_now
+        if self._bdf_path_cache != path:
+            self.logger.info("📂 BDF dosyası okunuyor...")
+            bdf = BDF()
+            bdf.read_bdf(path, encoding='latin1')
+            self._bdf_cache      = bdf
+            self._bdf_path_cache = path
+            self.logger.info("✓ BDF dosyası okundu")
+        else:
+            self.logger.info("✓ BDF dosyası önbellekten alındı")
+        return self._bdf_cache
+
+    def _load_op2(self):
+        path = self.output_entry_now
+        if self._op2_path_cache != path:
+            self.logger.info("📂 OP2 dosyası okunuyor...")
+            op2 = OP2()
+            op2.read_op2(path)
+            self._op2_cache      = op2
+            self._op2_path_cache = path
+            self.logger.info("✓ OP2 dosyası okundu")
+        else:
+            self.logger.info("✓ OP2 dosyası önbellekten alındı")
+        return self._op2_cache
 
     def build_ui(self):
         self._build_header()
@@ -589,13 +656,8 @@ class LoadExtractionApp:
             messagebox.showerror("Hata", "Property ID'leri girin (tüm için: ALL)")
             return
 
-        self.logger.info("📂 OP2 ve BDF dosyaları okunuyor...")
-        op2 = OP2()
-        bdf = BDF()
-        op2.read_op2(self.output_entry_now)
-        self.logger.info("✓ OP2 dosyası okundu")
-        bdf.read_bdf(self.input_entry_now, encoding='latin1')
-        self.logger.info("✓ BDF dosyası okundu")
+        op2 = self._load_op2()
+        bdf = self._load_bdf()
 
         self.logger.info("🔍 Property ID'leri parse ediliyor...")
         all_pids = set([elem.pid for elem in bdf.elements.values()
@@ -659,46 +721,50 @@ class LoadExtractionApp:
                 continue
             element_ids = element_forces.element
             forces_data = element_forces.data[0]
-            load_ids = element_forces.loadIDs[0]
+            load_ids    = element_forces.loadIDs[0]
+            eid_to_idx  = {int(e): i for i, e in enumerate(element_ids)}
             for element_id, element_property_id in elements_with_properties.items():
-                if element_id in element_ids:
-                    index = np.where(element_ids == element_id)[0][0]
-                    f = forces_data[index]
-                    area = element_areas[element_id]
-                    pf = property_forces[load_case_id][element_property_id]
-                    pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
-                    pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
-                    element_base_data.append({
-                        'Property ID': element_property_id,
-                        'Element ID':  element_id,
-                        'Load Case ID': load_ids,
-                        'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
-                        'Mx': f[3], 'My': f[4], 'Mxy': f[5],
-                        'Thickness': property_thickness[element_property_id],
-                    })
+                index = eid_to_idx.get(element_id)
+                if index is None:
+                    continue
+                f    = forces_data[index]
+                area = element_areas[element_id]
+                pf   = property_forces[load_case_id][element_property_id]
+                pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
+                pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
+                element_base_data.append({
+                    'Property ID': element_property_id,
+                    'Element ID':  element_id,
+                    'Load Case ID': load_ids,
+                    'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
+                    'Mx': f[3], 'My': f[4], 'Mxy': f[5],
+                    'Thickness': property_thickness[element_property_id],
+                })
 
         for load_case_id, element_forces in op2_data.ctria3_force.items():
             if load_case_id not in target_lc_ids:
                 continue
             element_ids = element_forces.element
             forces_data = element_forces.data[0]
-            load_ids = element_forces.loadIDs[0]
+            load_ids    = element_forces.loadIDs[0]
+            eid_to_idx  = {int(e): i for i, e in enumerate(element_ids)}
             for element_id, element_property_id in elements_with_properties.items():
-                if element_id in element_ids:
-                    index = np.where(element_ids == element_id)[0][0]
-                    f = forces_data[index]
-                    area = element_areas[element_id]
-                    pf = property_forces[load_case_id][element_property_id]
-                    pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
-                    pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
-                    element_base_data.append({
-                        'Property ID': element_property_id,
-                        'Element ID':  element_id,
-                        'Load Case ID': load_ids,
-                        'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
-                        'Mx': f[3], 'My': f[4], 'Mxy': f[5],
-                        'Thickness': property_thickness[element_property_id],
-                    })
+                index = eid_to_idx.get(element_id)
+                if index is None:
+                    continue
+                f    = forces_data[index]
+                area = element_areas[element_id]
+                pf   = property_forces[load_case_id][element_property_id]
+                pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
+                pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
+                element_base_data.append({
+                    'Property ID': element_property_id,
+                    'Element ID':  element_id,
+                    'Load Case ID': load_ids,
+                    'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
+                    'Mx': f[3], 'My': f[4], 'Mxy': f[5],
+                    'Thickness': property_thickness[element_property_id],
+                })
 
         df = pd.DataFrame(element_base_data)
         output_csv = os.path.join(self.stress_output_now2, 'Element_Load.csv')
@@ -764,13 +830,8 @@ class LoadExtractionApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_stress(self):
-        self.logger.info("📂 OP2 ve BDF dosyaları okunuyor...")
-        op2 = OP2()
-        bdf = BDF()
-        op2.read_op2(self.output_entry_now)
-        self.logger.info("✓ OP2 dosyası okundu")
-        bdf.read_bdf(self.input_entry_now, encoding='latin1')
-        self.logger.info("✓ BDF dosyası okundu")
+        op2 = self._load_op2()
+        bdf = self._load_bdf()
 
         prop_str = self.stress_prop_entry.get().strip()
         all_pids = {e.pid for e in bdf.elements.values()
@@ -915,13 +976,8 @@ class LoadExtractionApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_displacement(self):
-        self.logger.info("📂 BDF ve OP2 dosyaları okunuyor...")
-        op2 = OP2()
-        bdf = BDF()
-        op2.read_op2(self.output_entry_now)
-        self.logger.info("✓ OP2 dosyası okundu")
-        bdf.read_bdf(self.input_entry_now, encoding='latin1')
-        self.logger.info("✓ BDF dosyası okundu")
+        op2 = self._load_op2()
+        bdf = self._load_bdf()
 
         prop_str = self.disp_prop_entry.get().strip()
         all_pids = {e.pid for e in bdf.elements.values()
@@ -1010,10 +1066,7 @@ class LoadExtractionApp:
             messagebox.showerror("Hata", "Element ID'leri girin (tüm için: ALL)")
             return
 
-        self.logger.info("📂 OP2 dosyası okunuyor...")
-        op2 = OP2()
-        op2.read_op2(self.output_entry_now)
-        self.logger.info("✓ OP2 dosyası okundu")
+        op2 = self._load_op2()
 
         self.logger.info("🔍 Element ID'leri parse ediliyor...")
         all_eids = []
@@ -1035,23 +1088,22 @@ class LoadExtractionApp:
 
         self.logger.info("🔄 Bush force verileri çıkarılıyor...")
         bush_forces_data = []
+        selected_set = set(int(e) for e in selected_element_ids)
         for load_case_id, element_forces in op2.cbush_force.items():
             if load_case_id not in target_lc_bush:
                 continue
             element_ids = element_forces.element
             forces_data = element_forces.data[0]
-            load_ids = element_forces.loadIDs[0]
-
+            load_ids    = element_forces.loadIDs[0]
             for i, element_id in enumerate(element_ids):
-                if element_id in selected_element_ids:
-                    index = np.where(element_ids == element_id)[0][0]
-                    forces = forces_data[index][:3]
+                if int(element_id) in selected_set:
+                    forces = forces_data[i][:3]
                     bush_forces_data.append({
-                        'Element ID':element_id,
-                        'Load Case ID':load_ids,
-                        'FX':forces[0],
-                        'FY':forces[1],
-                        'FZ':forces[2]
+                        'Element ID':  element_id,
+                        'Load Case ID': load_ids,
+                        'FX': forces[0],
+                        'FY': forces[1],
+                        'FZ': forces[2],
                     })
 
         df_bush_raw = pd.DataFrame(bush_forces_data)
