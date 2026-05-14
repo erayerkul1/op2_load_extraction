@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox, scrolledtext
 import time
 import math
 import logging
+import threading
 from datetime import datetime
 from collections import defaultdict
 
@@ -169,42 +170,48 @@ def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
 
 def extract_critical_displacement(disp_data):
     """Per (Property ID, Node ID) select load case with max Magnitude."""
-    enriched  = {}
-    group_lcs = {}
-    for row in disp_data:
-        gid = (row['Property ID'], row['Node ID'])
-        lc  = row['Load Case ID']
-        key = (gid, lc)
-        if key in enriched:
-            continue
-        r = {**row, '_mag': float(row['Magnitude']), '_selected': False}
-        enriched[key] = r
-        group_lcs.setdefault(gid, []).append(r)
-    for rows in group_lcs.values():
-        max(rows, key=lambda r: r['_mag'])['_selected'] = True
-    result = [r for r in enriched.values() if r['_selected']]
+    if not disp_data:
+        return []
+    seen = {}
+    for i, row in enumerate(disp_data):
+        key = ((row['Property ID'], row['Node ID']), row['Load Case ID'])
+        if key not in seen:
+            seen[key] = i
+    rows = [disp_data[i] for i in seen.values()]
+    mag_arr = np.array([float(r['Magnitude']) for r in rows])
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[(r['Property ID'], r['Node ID'])].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        selected.add(g_rows[int(np.argmax(mag_arr[g_rows]))])
+    result = [rows[i] for i in sorted(selected)]
     result.sort(key=lambda r: (r['Property ID'], r['Node ID'], r['Load Case ID']))
     return result
 
 
 def extract_critical_stress(stress_data, group_key):
-    vm_z1_key = 'VM_Z1'     if group_key == 'Element ID' else 'Avg_VM_Z1'
-    vm_z2_key = 'VM_Z2'     if group_key == 'Element ID' else 'Avg_VM_Z2'
-    enriched  = {}
-    group_lcs = {}
-    for row in stress_data:
-        gid = row[group_key]
-        lc  = row['Load Case ID']
-        key = (gid, lc)
-        if key in enriched:
-            continue
-        vm_max = max(abs(float(row.get(vm_z1_key, 0))), abs(float(row.get(vm_z2_key, 0))))
-        r = {**row, '_vm_max': vm_max, '_selected': False}
-        enriched[key] = r
-        group_lcs.setdefault(gid, []).append(r)
-    for rows in group_lcs.values():
-        max(rows, key=lambda r: r['_vm_max'])['_selected'] = True
-    result = [r for r in enriched.values() if r['_selected']]
+    if not stress_data:
+        return []
+    vm_z1_key = 'VM_Z1' if group_key == 'Element ID' else 'Avg_VM_Z1'
+    vm_z2_key = 'VM_Z2' if group_key == 'Element ID' else 'Avg_VM_Z2'
+    seen = {}
+    for i, row in enumerate(stress_data):
+        key = (row[group_key], row['Load Case ID'])
+        if key not in seen:
+            seen[key] = i
+    rows = [stress_data[i] for i in seen.values()]
+    vm_max = np.maximum(
+        np.abs(np.array([float(r.get(vm_z1_key, 0)) for r in rows])),
+        np.abs(np.array([float(r.get(vm_z2_key, 0)) for r in rows]))
+    )
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[r[group_key]].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        selected.add(g_rows[int(np.argmax(vm_max[g_rows]))])
+    result = [rows[i] for i in sorted(selected)]
     result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
     return result
 
@@ -333,11 +340,12 @@ class TextHandler(logging.Handler):
 
     def emit(self, record):
         msg = self.format(record)
-        self.text_widget.config(state=tk.NORMAL)
-        self.text_widget.insert(tk.END, msg + '\n')
-        self.text_widget.see(tk.END)
-        self.text_widget.config(state=tk.DISABLED)
-        self.text_widget.update()
+        def _append():
+            self.text_widget.config(state=tk.NORMAL)
+            self.text_widget.insert(tk.END, msg + '\n')
+            self.text_widget.see(tk.END)
+            self.text_widget.config(state=tk.DISABLED)
+        self.text_widget.after(0, _append)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -439,11 +447,12 @@ class LoadExtractionApp:
         tk.Frame(bar, bg=self.COLORS['border'], height=1).pack(fill='x')
         inner = tk.Frame(bar, bg=self.COLORS['bg'])
         inner.pack(fill='x', padx=16, pady=10)
-        tk.Button(inner, text='▶  RUN ANALYSIS', command=self.asc_run,
+        self.run_btn = tk.Button(inner, text='▶  RUN ANALYSIS', command=self.asc_run,
                   bg=self.COLORS['success'], fg='white',
                   font=('Segoe UI', 11, 'bold'), relief='flat',
                   cursor='hand2', activebackground='#2ea043',
-                  pady=9).pack(side='left', fill='x', expand=True, padx=(0, 10))
+                  pady=9)
+        self.run_btn.pack(side='left', fill='x', expand=True, padx=(0, 10))
         tk.Button(inner, text='⟳  CLEAR', command=self.clear_log,
                   bg=self.COLORS['surface2'], fg=self.COLORS['text'],
                   font=('Segoe UI', 11), relief='flat', cursor='hand2',
@@ -708,6 +717,10 @@ class LoadExtractionApp:
             messagebox.showerror('Hata', 'BDF ve H5 dosyalarını seçin!')
             return
 
+        self.run_btn.config(state='disabled', text='⏳ Çalışıyor...')
+        threading.Thread(target=self._run_worker, daemon=True).start()
+
+    def _run_worker(self):
         fh = logging.FileHandler(os.path.join(
             self.output_dir,
             f'LoadExtraction_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'))
@@ -729,17 +742,19 @@ class LoadExtractionApp:
                 self.run_displacement()
             else:
                 self.run_stress()
+
+            elapsed = time.time() - start
+            self.logger.info('=' * 60)
+            self.logger.info(f'✅ İşlem tamamlandı! ({elapsed:.2f} saniye)')
+            self.logger.info(f'📁 Çıktılar: {self.output_dir}')
+            self.logger.info('=' * 60)
+            self.root.after(0, lambda: messagebox.showinfo(
+                'Başarılı', f'İşlem Tamamlandı\nSüre: {elapsed:.2f} saniye'))
         except Exception as e:
             self.logger.error(f'HATA: {e}')
-            messagebox.showerror('Hata', str(e))
-            return
-
-        elapsed = time.time() - start
-        self.logger.info('=' * 60)
-        self.logger.info(f'✅ İşlem tamamlandı! ({elapsed:.2f} saniye)')
-        self.logger.info(f'📁 Çıktılar: {self.output_dir}')
-        self.logger.info('=' * 60)
-        messagebox.showinfo('Başarılı', f'İşlem Tamamlandı\nSüre: {elapsed:.2f} saniye')
+            self.root.after(0, lambda: messagebox.showerror('Hata', str(e)))
+        finally:
+            self.root.after(0, lambda: self.run_btn.config(state='normal', text='▶  RUN ANALYSIS'))
 
     # ─────────────────────────────────────────────────────────────────────────
     # PSHELL EXTRACTION  (CQUAD4 + CTRIA3)
@@ -822,9 +837,17 @@ class LoadExtractionApp:
                 property_areas[elem.pid] = property_areas.get(elem.pid, 0.0) + area
         self.logger.info(f'✓ {len(element_areas)} element alanı hesaplandı')
 
-        # ── Process both element types ─────────────────────────────────────
-        element_base_data = []
-        property_forces   = {}
+        # ── Pre-build element mapping arrays once (outside all LC loops) ───
+        pid_list      = sorted(target_pids)
+        pid_to_ridx   = {pid: i for i, pid in enumerate(pid_list)}
+        n_pids        = len(pid_list)
+        tgt_eids_list = list(elem_to_pid.keys())
+        tgt_pids_list = [elem_to_pid[e] for e in tgt_eids_list]
+        tgt_eids_arr  = np.array(tgt_eids_list, dtype=np.int64)
+        tgt_ridx_arr  = np.array([pid_to_ridx[p] for p in tgt_pids_list])
+        tgt_pids_arr  = np.array(tgt_pids_list,  dtype=np.int64)
+        tgt_areas_arr = np.array([element_areas[e] for e in tgt_eids_list])
+        tgt_thick_arr = np.array([property_thickness[p] for p in tgt_pids_list])
 
         sources = [
             ('CQUAD4', q4_dom, q4_eid, q4_MX, q4_MY, q4_MXY, q4_BMX, q4_BMY, q4_BMXY),
@@ -833,6 +856,10 @@ class LoadExtractionApp:
             sources.append(('CTRIA3', t3_dom, t3_eid, t3_MX, t3_MY, t3_MXY, t3_BMX, t3_BMY, t3_BMXY))
 
         self.logger.info('🔄 Element forces işleniyor (CQUAD4 + CTRIA3)...')
+        elem_chunks = []
+        # pf_accum[lc_did] = (n_pids, 6) array  [Nx, Ny, Nxy, Mx, My, Mxy] × area
+        pf_accum = {}
+
         for etype, dom_arr, eid_arr, MX_arr, MY_arr, MXY_arr, BMX_arr, BMY_arr, BMXY_arr in sources:
             for lc_did in np.unique(dom_arr):
                 if int(lc_did) not in target_dids:
@@ -855,42 +882,43 @@ class LoadExtractionApp:
                 lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
                 eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
 
-                pf = property_forces.setdefault(lc_did, {
-                    pid: {'Nx': 0.0, 'Ny': 0.0, 'Nxy': 0.0, 'Mx': 0.0, 'My': 0.0, 'Mxy': 0.0}
-                    for pid in target_pids
-                })
+                # Vectorized: find LC indices for all target elements at once
+                v_idxs = np.array([eid_to_idx.get(int(e), -1) for e in tgt_eids_arr])
+                valid  = v_idxs >= 0
+                if not valid.any():
+                    continue
+                sel    = v_idxs[valid]
+                nx  = lc_MX[sel].astype(float);   ny  = lc_MY[sel].astype(float)
+                nxy = lc_MXY[sel].astype(float);  mx  = lc_BMX[sel].astype(float)
+                my  = lc_BMY[sel].astype(float);  mxy = lc_BMXY[sel].astype(float)
+                areas  = tgt_areas_arr[valid]
+                ridxs  = tgt_ridx_arr[valid]
 
-                for eid, pid in elem_to_pid.items():
-                    idx = eid_to_idx.get(eid)
-                    if idx is None:
-                        continue
-                    nx  = float(lc_MX[idx]);  ny  = float(lc_MY[idx]);  nxy = float(lc_MXY[idx])
-                    mx  = float(lc_BMX[idx]); my  = float(lc_BMY[idx]); mxy = float(lc_BMXY[idx])
-                    area = element_areas[eid]
+                # Accumulate property forces with np.add.at (no Python dict +=)
+                pf = pf_accum.setdefault(lc_did, np.zeros((n_pids, 6)))
+                np.add.at(pf, ridxs, np.column_stack(
+                    [nx*areas, ny*areas, nxy*areas, mx*areas, my*areas, mxy*areas]))
 
-                    pf[pid]['Nx'] += nx*area;  pf[pid]['Ny'] += ny*area;  pf[pid]['Nxy'] += nxy*area
-                    pf[pid]['Mx'] += mx*area;  pf[pid]['My'] += my*area;  pf[pid]['Mxy'] += mxy*area
-
-                    element_base_data.append({
-                        'Property ID':  pid,
-                        'Element ID':   eid,
-                        'Element Type': etype,
-                        'Load Case ID': lc_name,
-                        'Nx': nx, 'Ny': ny, 'Nxy': nxy,
-                        'Mx': mx, 'My': my, 'Mxy': mxy,
-                        'Thickness': property_thickness[pid],
-                    })
+                # Build element chunk as column-dict DataFrame (faster than list-of-dicts)
+                elem_chunks.append(pd.DataFrame({
+                    'Property ID':  tgt_pids_arr[valid],
+                    'Element ID':   tgt_eids_arr[valid],
+                    'Element Type': etype,
+                    'Load Case ID': lc_name,
+                    'Nx': nx, 'Ny': ny, 'Nxy': nxy,
+                    'Mx': mx, 'My': my, 'Mxy': mxy,
+                    'Thickness': tgt_thick_arr[valid],
+                }))
 
         # ── Element_Load.csv ──────────────────────────────────────────────
-        df_elem = pd.DataFrame(element_base_data)
-        p = os.path.join(self.output_dir, 'Element_Load.csv')
-        df_elem.to_csv(p, index=False)
+        df_elem = pd.concat(elem_chunks, ignore_index=True) if elem_chunks else pd.DataFrame()
+        df_elem.to_csv(os.path.join(self.output_dir, 'Element_Load.csv'), index=False)
         self.logger.info(f'✓ Element_Load.csv yazıldı ({len(df_elem)} satır)')
 
         # ── Element_Load_Reduced.csv (16 metrik) ──────────────────────────
         self.logger.info('🔄 Element reduction hesaplanıyor (16 metrik)...')
         critical_elem = extract_critical_pshell(
-            element_base_data, 'Element ID', 'Nx', 'Ny', 'Nxy')
+            df_elem.to_dict('records'), 'Element ID', 'Nx', 'Ny', 'Nxy')
         reduced_elem = [{
             'Property ID':  r['Property ID'],
             'Element ID':   r['Element ID'],
@@ -900,31 +928,28 @@ class LoadExtractionApp:
             'Mx': r['Mx'],  'My': r['My'],  'Mxy': r['Mxy'],
             'Thickness': r['Thickness'],
         } for r in critical_elem]
-        df_elem_red = pd.DataFrame(reduced_elem)
-        p = os.path.join(self.output_dir, 'Element_Load_Reduced.csv')
-        df_elem_red.to_csv(p, index=False)
-        self.logger.info(f'✓ Element_Load_Reduced.csv yazıldı ({len(df_elem_red)} kritik satır)')
+        pd.DataFrame(reduced_elem).to_csv(
+            os.path.join(self.output_dir, 'Element_Load_Reduced.csv'), index=False)
+        self.logger.info(f'✓ Element_Load_Reduced.csv yazıldı ({len(reduced_elem)} kritik satır)')
 
-        # ── Average_Load.csv ──────────────────────────────────────────────
+        # ── Average_Load.csv — built from pf_accum matrix ─────────────────
+        avg_area_arr  = np.array([property_areas.get(p, 1.0) for p in pid_list])
+        avg_thick_arr = np.array([property_thickness[p]       for p in pid_list])
         average_data = []
-        for lc_did, pf in property_forces.items():
+        for lc_did, pf in pf_accum.items():
             lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
-            for pid, forces in pf.items():
-                total_area = property_areas.get(pid, 1.0)
+            avg = pf / avg_area_arr[:, None]   # (n_pids, 6) / (n_pids, 1)
+            for i, pid in enumerate(pid_list):
                 average_data.append({
                     'Property ID':  pid,
                     'Load Case ID': lc_name,
-                    'Average Nx':  forces['Nx']  / total_area,
-                    'Average Ny':  forces['Ny']  / total_area,
-                    'Average Nxy': forces['Nxy'] / total_area,
-                    'Average Mx':  forces['Mx']  / total_area,
-                    'Average My':  forces['My']  / total_area,
-                    'Average Mxy': forces['Mxy'] / total_area,
-                    'Thickness':   property_thickness[pid],
+                    'Average Nx':  float(avg[i, 0]), 'Average Ny':  float(avg[i, 1]),
+                    'Average Nxy': float(avg[i, 2]), 'Average Mx':  float(avg[i, 3]),
+                    'Average My':  float(avg[i, 4]), 'Average Mxy': float(avg[i, 5]),
+                    'Thickness':   float(avg_thick_arr[i]),
                 })
         df_avg = pd.DataFrame(average_data)
-        p = os.path.join(self.output_dir, 'Average_Load.csv')
-        df_avg.to_csv(p, index=False)
+        df_avg.to_csv(os.path.join(self.output_dir, 'Average_Load.csv'), index=False)
         self.logger.info(f'✓ Average_Load.csv yazıldı ({len(df_avg)} satır)')
 
         # ── Average_Load_Reduced.csv (16 metrik) ──────────────────────────
@@ -940,10 +965,9 @@ class LoadExtractionApp:
             'Average Mxy': r['Average Mxy'],
             'Thickness':   r['Thickness'],
         } for r in critical_avg]
-        df_avg_red = pd.DataFrame(reduced_avg)
-        p = os.path.join(self.output_dir, 'Average_Load_Reduced.csv')
-        df_avg_red.to_csv(p, index=False)
-        self.logger.info(f'✓ Average_Load_Reduced.csv yazıldı ({len(df_avg_red)} kritik satır)')
+        pd.DataFrame(reduced_avg).to_csv(
+            os.path.join(self.output_dir, 'Average_Load_Reduced.csv'), index=False)
+        self.logger.info(f'✓ Average_Load_Reduced.csv yazıldı ({len(reduced_avg)} kritik satır)')
 
     # ─────────────────────────────────────────────────────────────────────────
     # STRESS EXTRACTION
@@ -1151,14 +1175,16 @@ class LoadExtractionApp:
         target_dids, target_sc = self._target_domains(domain_to_subcase, self.disp_lc_entry)
         self.logger.info(f'✓ {len(target_sc)} load case seçildi')
 
-        # Build reverse map once: nid → [pid, ...] for O(1) lookup inside lc loop
-        node_to_pids = defaultdict(list)
-        for pid, nodes in pid_to_nodes.items():
-            for nid in nodes:
-                node_to_pids[int(nid)].append(pid)
+        # Build flat (nid, pid) arrays once — enables vectorized indexing inside LC loop
+        flat_nids = np.array([int(nid)
+                               for pid, nodes in pid_to_nodes.items()
+                               for nid in nodes], dtype=np.int64)
+        flat_pids = np.array([pid
+                               for pid, nodes in pid_to_nodes.items()
+                               for nid in nodes], dtype=np.int64)
 
         self.logger.info('🔄 Displacement verileri işleniyor...')
-        disp_data = []
+        disp_chunks = []
         for lc_did in np.unique(d_dom):
             if int(lc_did) not in target_dids:
                 continue
@@ -1167,39 +1193,37 @@ class LoadExtractionApp:
             lc_X    = d_X[lc_mask];  lc_Y  = d_Y[lc_mask];  lc_Z  = d_Z[lc_mask]
             lc_RX   = d_RX[lc_mask]; lc_RY = d_RY[lc_mask]; lc_RZ = d_RZ[lc_mask]
             lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
-            # Iterate once over nodes that exist in H5; look up pids from reverse map
-            for idx, nid in enumerate(lc_nids.tolist()):
-                pids = node_to_pids.get(nid)
-                if pids is None:
-                    continue
-                x, y, z   = float(lc_X[idx]),  float(lc_Y[idx]),  float(lc_Z[idx])
-                rx, ry, rz = float(lc_RX[idx]), float(lc_RY[idx]), float(lc_RZ[idx])
-                mag = math.sqrt(x**2 + y**2 + z**2)
-                for pid in pids:
-                    disp_data.append({
-                        'Property ID':  pid,
-                        'Node ID':      nid,
-                        'Load Case ID': lc_name,
-                        'X': x, 'Y': y, 'Z': z,
-                        'Magnitude': mag,
-                        'Rx': rx, 'Ry': ry, 'Rz': rz,
-                    })
 
-        df_all = pd.DataFrame(disp_data)
+            # Build nid→row index dict, then vectorized lookup for all flat pairs
+            nid_to_idx_lc = {int(n): i for i, n in enumerate(lc_nids)}
+            v_idxs = np.array([nid_to_idx_lc.get(int(n), -1) for n in flat_nids])
+            valid  = v_idxs >= 0
+            if not valid.any():
+                continue
+            sel    = v_idxs[valid]
+            x = lc_X[sel];  y = lc_Y[sel];  z = lc_Z[sel]
+            rx = lc_RX[sel]; ry = lc_RY[sel]; rz = lc_RZ[sel]
+            mag = np.sqrt(x**2 + y**2 + z**2)
+            disp_chunks.append(pd.DataFrame({
+                'Property ID':  flat_pids[valid],
+                'Node ID':      flat_nids[valid],
+                'Load Case ID': lc_name,
+                'X': x, 'Y': y, 'Z': z,
+                'Magnitude':    mag,
+                'Rx': rx, 'Ry': ry, 'Rz': rz,
+            }))
+
+        df_all = pd.concat(disp_chunks, ignore_index=True) if disp_chunks else pd.DataFrame()
         df_all.to_csv(os.path.join(self.output_dir, 'Displacement_All.csv'), index=False)
         self.logger.info(f'✓ Displacement_All.csv yazıldı ({len(df_all)} satır)')
 
         self.logger.info('🔄 Displacement reduction hesaplanıyor (max Magnitude per node)...')
-        critical = extract_critical_displacement(disp_data)
-        reduced  = [{
-            'Property ID':  r['Property ID'],
-            'Node ID':      r['Node ID'],
-            'Load Case ID': r['Load Case ID'],
-            'X': r['X'], 'Y': r['Y'], 'Z': r['Z'],
-            'Magnitude': r['Magnitude'],
-            'Rx': r['Rx'], 'Ry': r['Ry'], 'Rz': r['Rz'],
-        } for r in critical]
-        df_red = pd.DataFrame(reduced)
+        if not df_all.empty:
+            idx_max = df_all.groupby(['Property ID', 'Node ID'])['Magnitude'].idxmax()
+            df_red  = df_all.loc[idx_max].sort_values(
+                ['Property ID', 'Node ID', 'Load Case ID']).reset_index(drop=True)
+        else:
+            df_red = pd.DataFrame()
         df_red.to_csv(os.path.join(self.output_dir, 'Displacement_Reduced.csv'), index=False)
         self.logger.info(f'✓ Displacement_Reduced.csv yazıldı ({len(df_red)} kritik satır)')
 

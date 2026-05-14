@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, scrolledtext
 import time
 import math
 import logging
+import threading
 from datetime import datetime
 from collections import defaultdict
 from pyNastran.op2.data_in_material_coord import data_in_material_coord
@@ -74,11 +75,12 @@ class TextHandler(logging.Handler):
 
     def emit(self, record):
         msg = self.format(record)
-        self.text_widget.config(state=tk.NORMAL)
-        self.text_widget.insert(tk.END, msg + '\n')
-        self.text_widget.see(tk.END)
-        self.text_widget.config(state=tk.DISABLED)
-        self.text_widget.update()
+        def _append():
+            self.text_widget.config(state=tk.NORMAL)
+            self.text_widget.insert(tk.END, msg + '\n')
+            self.text_widget.see(tk.END)
+            self.text_widget.config(state=tk.DISABLED)
+        self.text_widget.after(0, _append)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILITY FUNCTIONS
@@ -179,42 +181,48 @@ def extract_critical_pshell(raw_data, group_key, nx_key, ny_key, nxy_key):
 
 def extract_critical_displacement(disp_data):
     """Per (Property ID, Node ID) select load case with max Magnitude."""
-    enriched  = {}
-    group_lcs = {}
-    for row in disp_data:
-        gid = (row['Property ID'], row['Node ID'])
-        lc  = row['Load Case ID']
-        key = (gid, lc)
-        if key in enriched:
-            continue
-        r = {**row, '_mag': float(row['Magnitude']), '_selected': False}
-        enriched[key] = r
-        group_lcs.setdefault(gid, []).append(r)
-    for rows in group_lcs.values():
-        max(rows, key=lambda r: r['_mag'])['_selected'] = True
-    result = [r for r in enriched.values() if r['_selected']]
+    if not disp_data:
+        return []
+    seen = {}
+    for i, row in enumerate(disp_data):
+        key = ((row['Property ID'], row['Node ID']), row['Load Case ID'])
+        if key not in seen:
+            seen[key] = i
+    rows = [disp_data[i] for i in seen.values()]
+    mag_arr = np.array([float(r['Magnitude']) for r in rows])
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[(r['Property ID'], r['Node ID'])].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        selected.add(g_rows[int(np.argmax(mag_arr[g_rows]))])
+    result = [rows[i] for i in sorted(selected)]
     result.sort(key=lambda r: (r['Property ID'], r['Node ID'], r['Load Case ID']))
     return result
 
 
 def extract_critical_stress(stress_data, group_key):
-    vm_z1_key = 'VM_Z1'  if group_key == 'Element ID' else 'Avg_VM_Z1'
-    vm_z2_key = 'VM_Z2'  if group_key == 'Element ID' else 'Avg_VM_Z2'
-    enriched  = {}
-    group_lcs = {}
-    for row in stress_data:
-        gid = row[group_key]
-        lc  = row['Load Case ID']
-        key = (gid, lc)
-        if key in enriched:
-            continue
-        vm_max = max(abs(float(row.get(vm_z1_key, 0))), abs(float(row.get(vm_z2_key, 0))))
-        r = {**row, '_vm_max': vm_max, '_selected': False}
-        enriched[key] = r
-        group_lcs.setdefault(gid, []).append(r)
-    for gid, rows in group_lcs.items():
-        max(rows, key=lambda r: r['_vm_max'])['_selected'] = True
-    result = [r for r in enriched.values() if r['_selected']]
+    if not stress_data:
+        return []
+    vm_z1_key = 'VM_Z1' if group_key == 'Element ID' else 'Avg_VM_Z1'
+    vm_z2_key = 'VM_Z2' if group_key == 'Element ID' else 'Avg_VM_Z2'
+    seen = {}
+    for i, row in enumerate(stress_data):
+        key = (row[group_key], row['Load Case ID'])
+        if key not in seen:
+            seen[key] = i
+    rows = [stress_data[i] for i in seen.values()]
+    vm_max = np.maximum(
+        np.abs(np.array([float(r.get(vm_z1_key, 0)) for r in rows])),
+        np.abs(np.array([float(r.get(vm_z2_key, 0)) for r in rows]))
+    )
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[r[group_key]].append(i)
+    selected = set()
+    for g_rows in groups.values():
+        selected.add(g_rows[int(np.argmax(vm_max[g_rows]))])
+    result = [rows[i] for i in sorted(selected)]
     result.sort(key=lambda r: (r[group_key], r['Load Case ID']))
     return result
 
@@ -345,11 +353,12 @@ class LoadExtractionApp:
         tk.Frame(bar, bg=self.COLORS['border'], height=1).pack(fill='x')
         inner = tk.Frame(bar, bg=self.COLORS['bg'])
         inner.pack(fill='x', padx=16, pady=10)
-        tk.Button(inner, text='▶  RUN ANALYSIS', command=self.asc_run,
+        self.run_btn = tk.Button(inner, text='▶  RUN ANALYSIS', command=self.asc_run,
                   bg=self.COLORS['success'], fg='white',
                   font=('Segoe UI', 11, 'bold'), relief='flat',
                   cursor='hand2', activebackground='#2ea043',
-                  pady=9).pack(side='left', fill='x', expand=True, padx=(0, 10))
+                  pady=9)
+        self.run_btn.pack(side='left', fill='x', expand=True, padx=(0, 10))
         tk.Button(inner, text='⟳  CLEAR', command=self.clear_log,
                   bg=self.COLORS['surface2'], fg=self.COLORS['text'],
                   font=('Segoe UI', 11), relief='flat', cursor='hand2',
@@ -604,14 +613,21 @@ class LoadExtractionApp:
     def asc_run(self):
         self.clear_log()
 
-        # Sync widget values before running
+        # Sync widget values before handing off to thread
         self.pshell_property_ids = self.property_id_entry.get().strip()
         self.bush_element_ids    = self.bush_element_id_entry.get().strip()
 
         if not self.stress_output_now2:
             messagebox.showerror("Hata", "Çıktı klasörünü seçin!")
             return
+        if not self.input_entry_now or not self.output_entry_now:
+            messagebox.showerror("Hata", "BDF ve OP2 dosyalarını seçin")
+            return
 
+        self.run_btn.config(state='disabled', text='⏳ Çalışıyor...')
+        threading.Thread(target=self._run_worker, daemon=True).start()
+
+    def _run_worker(self):
         file_handler = logging.FileHandler(
             os.path.join(self.stress_output_now2,
                          f'LoadExtraction_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'))
@@ -624,27 +640,28 @@ class LoadExtractionApp:
         self.logger.info("="*60)
 
         start_time = time.time()
+        try:
+            if self.extraction_type.get() == "PSHELL ALL AVERAGE":
+                self.run_pshell()
+            elif self.extraction_type.get() == "BUSH LOAD":
+                self.run_bush()
+            elif self.extraction_type.get() == "DISPLACEMENT":
+                self.run_displacement()
+            else:
+                self.run_stress()
 
-        if not self.input_entry_now or not self.output_entry_now:
-            self.logger.error("Gerekli dosyalar seçilmedi!")
-            messagebox.showerror("Hata", "BDF ve OP2 dosyalarını seçin")
-            return
-
-        if self.extraction_type.get() == "PSHELL ALL AVERAGE":
-            self.run_pshell()
-        elif self.extraction_type.get() == "BUSH LOAD":
-            self.run_bush()
-        elif self.extraction_type.get() == "DISPLACEMENT":
-            self.run_displacement()
-        else:
-            self.run_stress()
-
-        elapsed = time.time() - start_time
-        self.logger.info("="*60)
-        self.logger.info(f"✅ İşlem tamamlandı! ({elapsed:.2f} saniye)")
-        self.logger.info(f"📁 Çıktılar: {self.stress_output_now2}")
-        self.logger.info("="*60)
-        messagebox.showinfo("Başarılı", f"İşlem Tamamlandı\nSüre: {elapsed:.2f} saniye")
+            elapsed = time.time() - start_time
+            self.logger.info("="*60)
+            self.logger.info(f"✅ İşlem tamamlandı! ({elapsed:.2f} saniye)")
+            self.logger.info(f"📁 Çıktılar: {self.stress_output_now2}")
+            self.logger.info("="*60)
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Başarılı", f"İşlem Tamamlandı\nSüre: {elapsed:.2f} saniye"))
+        except Exception as e:
+            self.logger.error(f"HATA: {e}")
+            self.root.after(0, lambda: messagebox.showerror("Hata", str(e)))
+        finally:
+            self.root.after(0, lambda: self.run_btn.config(state='normal', text='▶  RUN'))
 
     # ─────────────────────────────────────────────────────────────────────────
     # PSHELL EXTRACTION
@@ -707,95 +724,89 @@ class LoadExtractionApp:
                     property_areas[property_id] = 0.0
                 property_areas[property_id] += area
 
-        element_base_data = []
-
         is_material_cid = self.coordinate_system.get() == "Material CID"
         coord_mode = "Material CID" if is_material_cid else "Element CID"
         self.logger.info(f"🔄 Koordinat sistemi: {coord_mode}")
         op2_data = data_in_material_coord(bdf, op2, in_place=False) if is_material_cid else op2
         self.logger.info("✓ Koordinat dönüşümü tamamlandı" if is_material_cid else "✓ Element CID kullanılacak")
 
+        # ── Pre-build element mapping arrays once (outside all LC loops) ───
+        pid_list      = sorted(set(target_property_ids))
+        pid_to_ridx   = {pid: i for i, pid in enumerate(pid_list)}
+        n_pids        = len(pid_list)
+        tgt_eids_list = list(elements_with_properties.keys())
+        tgt_pids_list = [elements_with_properties[e] for e in tgt_eids_list]
+        tgt_eids_arr  = np.array(tgt_eids_list, dtype=np.int64)
+        tgt_pids_arr  = np.array(tgt_pids_list, dtype=np.int64)
+        tgt_ridx_arr  = np.array([pid_to_ridx[p] for p in tgt_pids_list])
+        tgt_areas_arr = np.array([element_areas[e] for e in tgt_eids_list])
+        tgt_thick_arr = np.array([property_thickness[p] for p in tgt_pids_list])
+        avg_area_arr  = np.array([property_areas[p] for p in pid_list])
+        avg_thick_arr = np.array([property_thickness[p] for p in pid_list])
+
         self.logger.info("🔄 Element forces işleniyor...")
-        for load_case_id, element_forces in op2_data.cquad4_force.items():
-            if load_case_id not in target_lc_ids:
-                continue
-            element_ids = element_forces.element
-            forces_data = element_forces.data[0]
-            load_ids    = element_forces.loadIDs[0]
-            eid_to_idx  = {int(e): i for i, e in enumerate(element_ids)}
-            for element_id, element_property_id in elements_with_properties.items():
-                index = eid_to_idx.get(element_id)
-                if index is None:
-                    continue
-                f    = forces_data[index]
-                area = element_areas[element_id]
-                pf   = property_forces[load_case_id][element_property_id]
-                pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
-                pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
-                element_base_data.append({
-                    'Property ID': element_property_id,
-                    'Element ID':  element_id,
-                    'Load Case ID': load_ids,
-                    'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
-                    'Mx': f[3], 'My': f[4], 'Mxy': f[5],
-                    'Thickness': property_thickness[element_property_id],
-                })
+        elem_chunks = []
+        pf_accum    = {}   # lc_id → (n_pids, 6) array [Nx,Ny,Nxy,Mx,My,Mxy] × area
 
-        for load_case_id, element_forces in op2_data.ctria3_force.items():
-            if load_case_id not in target_lc_ids:
-                continue
-            element_ids = element_forces.element
-            forces_data = element_forces.data[0]
-            load_ids    = element_forces.loadIDs[0]
-            eid_to_idx  = {int(e): i for i, e in enumerate(element_ids)}
-            for element_id, element_property_id in elements_with_properties.items():
-                index = eid_to_idx.get(element_id)
-                if index is None:
+        for force_dict, lc_label in [(op2_data.cquad4_force, 'CQUAD4'),
+                                     (op2_data.ctria3_force, 'CTRIA3')]:
+            for load_case_id, element_forces in force_dict.items():
+                if load_case_id not in target_lc_ids:
                     continue
-                f    = forces_data[index]
-                area = element_areas[element_id]
-                pf   = property_forces[load_case_id][element_property_id]
-                pf['Nx'] += f[0]*area; pf['Ny'] += f[1]*area; pf['Nxy'] += f[2]*area
-                pf['Mx'] += f[3]*area; pf['My'] += f[4]*area; pf['Mxy'] += f[5]*area
-                element_base_data.append({
-                    'Property ID': element_property_id,
-                    'Element ID':  element_id,
-                    'Load Case ID': load_ids,
-                    'Nx': f[0], 'Ny': f[1], 'Nxy': f[2],
-                    'Mx': f[3], 'My': f[4], 'Mxy': f[5],
-                    'Thickness': property_thickness[element_property_id],
-                })
+                element_ids = element_forces.element
+                forces_data = element_forces.data[0]
+                load_id     = element_forces.loadIDs[0]
+                eid_to_idx  = {int(e): i for i, e in enumerate(element_ids)}
 
-        df = pd.DataFrame(element_base_data)
-        output_csv = os.path.join(self.stress_output_now2, 'Element_Load.csv')
-        df.to_csv(output_csv, index=False)
+                # Vectorized lookup for all target elements at once
+                v_idxs = np.array([eid_to_idx.get(int(e), -1) for e in tgt_eids_arr])
+                valid  = v_idxs >= 0
+                if not valid.any():
+                    continue
+                sel    = v_idxs[valid]
+                f_sub  = forces_data[sel]           # (n_valid, ≥6)
+                nx, ny, nxy = f_sub[:, 0], f_sub[:, 1], f_sub[:, 2]
+                mx, my, mxy = f_sub[:, 3], f_sub[:, 4], f_sub[:, 5]
+                areas  = tgt_areas_arr[valid]
+                ridxs  = tgt_ridx_arr[valid]
+
+                # Accumulate property forces with np.add.at
+                pf = pf_accum.setdefault(load_id, np.zeros((n_pids, 6)))
+                np.add.at(pf, ridxs, np.column_stack(
+                    [nx*areas, ny*areas, nxy*areas, mx*areas, my*areas, mxy*areas]))
+
+                elem_chunks.append(pd.DataFrame({
+                    'Property ID':  tgt_pids_arr[valid],
+                    'Element ID':   tgt_eids_arr[valid],
+                    'Load Case ID': load_id,
+                    'Nx': nx, 'Ny': ny, 'Nxy': nxy,
+                    'Mx': mx, 'My': my, 'Mxy': mxy,
+                    'Thickness': tgt_thick_arr[valid],
+                }))
+
+        df = pd.concat(elem_chunks, ignore_index=True) if elem_chunks else pd.DataFrame()
+        df.to_csv(os.path.join(self.stress_output_now2, 'Element_Load.csv'), index=False)
         self.logger.info(f"✓ Element_Load.csv yazıldı ({len(df)} satır)")
 
+        # ── Average forces from pf_accum matrix ───────────────────────────
         Average_forces = []
-        for load_case_id, force_by_property in property_forces.items():
-            if load_case_id not in target_lc_ids:
-                continue
-            for property_id, forces in force_by_property.items():
-                total_area = property_areas[property_id]
+        for load_id, pf in pf_accum.items():
+            avg = pf / avg_area_arr[:, None]
+            for i, pid in enumerate(pid_list):
                 Average_forces.append({
-                    'Property ID':  property_id,
-                    'Load Case ID': load_case_id,
-                    'Average Nx':  forces['Nx']  / total_area,
-                    'Average Ny':  forces['Ny']  / total_area,
-                    'Average Nxy': forces['Nxy'] / total_area,
-                    'Average Mx':  forces['Mx']  / total_area,
-                    'Average My':  forces['My']  / total_area,
-                    'Average Mxy': forces['Mxy'] / total_area,
-                    'Thickness':   property_thickness[property_id],
+                    'Property ID':  pid,
+                    'Load Case ID': load_id,
+                    'Average Nx':  float(avg[i, 0]), 'Average Ny':  float(avg[i, 1]),
+                    'Average Nxy': float(avg[i, 2]), 'Average Mx':  float(avg[i, 3]),
+                    'Average My':  float(avg[i, 4]), 'Average Mxy': float(avg[i, 5]),
+                    'Thickness':   float(avg_thick_arr[i]),
                 })
-
         df2 = pd.DataFrame(Average_forces)
-        output_csv2 = os.path.join(self.stress_output_now2, 'Average_Load.csv')
-        df2.to_csv(output_csv2, index=False)
+        df2.to_csv(os.path.join(self.stress_output_now2, 'Average_Load.csv'), index=False)
         self.logger.info(f"✓ Average_Load.csv yazıldı ({len(df2)} satır)")
 
         self.logger.info("🔄 Element reduction hesaplanıyor (16 metrik)...")
-        critical_elem = extract_critical_pshell(element_base_data, 'Element ID', 'Nx', 'Ny', 'Nxy')
+        critical_elem = extract_critical_pshell(df.to_dict('records'), 'Element ID', 'Nx', 'Ny', 'Nxy')
         reduced_elem = [{
             'Property ID':  r['Property ID'],
             'Element ID':   r['Element ID'],
@@ -804,10 +815,9 @@ class LoadExtractionApp:
             'Mx': r['Mx'],  'My': r['My'],  'Mxy': r['Mxy'],
             'Thickness': r['Thickness'],
         } for r in critical_elem]
-        df_elem_reduced = pd.DataFrame(reduced_elem)
-        output_csv_elem_reduced = os.path.join(self.stress_output_now2, 'Element_Load_Reduced.csv')
-        df_elem_reduced.to_csv(output_csv_elem_reduced, index=False)
-        self.logger.info(f"✓ Element_Load_Reduced.csv yazıldı ({len(df_elem_reduced)} kritik satır)")
+        pd.DataFrame(reduced_elem).to_csv(
+            os.path.join(self.stress_output_now2, 'Element_Load_Reduced.csv'), index=False)
+        self.logger.info(f"✓ Element_Load_Reduced.csv yazıldı ({len(reduced_elem)} kritik satır)")
 
         self.logger.info("🔄 Average reduction hesaplanıyor (16 metrik)...")
         critical_avg = extract_critical_pshell(Average_forces, 'Property ID', 'Average Nx', 'Average Ny', 'Average Nxy')
@@ -815,15 +825,12 @@ class LoadExtractionApp:
             'Property ID':  r['Property ID'],
             'Load Case ID': r['Load Case ID'],
             'Average Nx':  r['_nx'], 'Average Ny':  r['_ny'], 'Average Nxy': r['_nxy'],
-            'Average Mx':  r['Average Mx'],
-            'Average My':  r['Average My'],
-            'Average Mxy': r['Average Mxy'],
-            'Thickness':   r['Thickness'],
+            'Average Mx':  r['Average Mx'], 'Average My':  r['Average My'],
+            'Average Mxy': r['Average Mxy'], 'Thickness':  r['Thickness'],
         } for r in critical_avg]
-        df_avg_reduced = pd.DataFrame(reduced_avg)
-        output_csv_avg_reduced = os.path.join(self.stress_output_now2, 'Average_Load_Reduced.csv')
-        df_avg_reduced.to_csv(output_csv_avg_reduced, index=False)
-        self.logger.info(f"✓ Average_Load_Reduced.csv yazıldı ({len(df_avg_reduced)} kritik satır)")
+        pd.DataFrame(reduced_avg).to_csv(
+            os.path.join(self.stress_output_now2, 'Average_Load_Reduced.csv'), index=False)
+        self.logger.info(f"✓ Average_Load_Reduced.csv yazıldı ({len(reduced_avg)} kritik satır)")
 
     # ─────────────────────────────────────────────────────────────────────────
     # STRESS EXTRACTION
@@ -1021,38 +1028,41 @@ class LoadExtractionApp:
                     pid_nid_idx.append((pid, int(nid), idx))
         self.logger.info(f"✓ {len(pid_nid_idx)} (property, node) çifti hazırlandı")
 
+        # Pre-extract numpy arrays once — enables single fancy-index per LC
+        idx_arr = np.array([t[2] for t in pid_nid_idx])
+        pid_arr = np.array([t[0] for t in pid_nid_idx])
+        nid_arr = np.array([t[1] for t in pid_nid_idx])
+        n_pairs = len(pid_nid_idx)
+
+        disp_chunks = []
         for lc_id, disp_result in op2.displacements.items():
             if lc_id not in target_lc:
                 continue
-            data = disp_result.data[0]  # (nnodes, 6)
-            for pid, nid, idx in pid_nid_idx:
-                row = data[idx]
-                x, y, z   = float(row[0]), float(row[1]), float(row[2])
-                rx, ry, rz = float(row[3]), float(row[4]), float(row[5])
-                disp_data.append({
-                    'Property ID':  pid,
-                    'Node ID':      nid,
-                    'Load Case ID': lc_id,
-                    'X': x, 'Y': y, 'Z': z,
-                    'Magnitude': math.sqrt(x**2 + y**2 + z**2),
-                    'Rx': rx, 'Ry': ry, 'Rz': rz,
-                })
+            sub        = disp_result.data[0][idx_arr]   # (n_pairs, 6) — single vectorized slice
+            x, y, z    = sub[:, 0], sub[:, 1], sub[:, 2]
+            rx, ry, rz = sub[:, 3], sub[:, 4], sub[:, 5]
+            mag        = np.sqrt(x**2 + y**2 + z**2)
+            disp_chunks.append(pd.DataFrame({
+                'Property ID':  pid_arr,
+                'Node ID':      nid_arr,
+                'Load Case ID': np.full(n_pairs, lc_id),
+                'X': x, 'Y': y, 'Z': z,
+                'Magnitude':    mag,
+                'Rx': rx, 'Ry': ry, 'Rz': rz,
+            }))
 
-        df_all = pd.DataFrame(disp_data)
+        df_all = pd.concat(disp_chunks, ignore_index=True) if disp_chunks else pd.DataFrame()
         df_all.to_csv(os.path.join(self.stress_output_now2, 'Displacement_All.csv'), index=False)
         self.logger.info(f"✓ Displacement_All.csv yazıldı ({len(df_all)} satır)")
 
         self.logger.info("🔄 Displacement reduction hesaplanıyor (max Magnitude per node)...")
-        critical = extract_critical_displacement(disp_data)
-        reduced  = [{
-            'Property ID':  r['Property ID'],
-            'Node ID':      r['Node ID'],
-            'Load Case ID': r['Load Case ID'],
-            'X': r['X'], 'Y': r['Y'], 'Z': r['Z'],
-            'Magnitude': r['Magnitude'],
-            'Rx': r['Rx'], 'Ry': r['Ry'], 'Rz': r['Rz'],
-        } for r in critical]
-        df_red = pd.DataFrame(reduced)
+        # Reduction directly on DataFrame — groupby idxmax is faster than list-of-dicts
+        if not df_all.empty:
+            idx_max = df_all.groupby(['Property ID', 'Node ID'])['Magnitude'].idxmax()
+            df_red  = df_all.loc[idx_max].sort_values(
+                ['Property ID', 'Node ID', 'Load Case ID']).reset_index(drop=True)
+        else:
+            df_red = pd.DataFrame()
         df_red.to_csv(os.path.join(self.stress_output_now2, 'Displacement_Reduced.csv'), index=False)
         self.logger.info(f"✓ Displacement_Reduced.csv yazıldı ({len(df_red)} kritik satır)")
 
