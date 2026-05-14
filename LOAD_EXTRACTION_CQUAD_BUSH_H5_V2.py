@@ -378,8 +378,8 @@ class LoadExtractionApp:
         self.logger = logging.getLogger('LoadExtractionH5')
         self.logger.setLevel(logging.INFO)
 
-        self.bdf_path  = ''
-        self.h5_path   = ''
+        self.bdf_path   = ''
+        self.h5_paths   = []   # list of selected H5 file paths
         self.output_dir = ''
 
         self.extraction_type     = tk.StringVar(value='PSHELL ALL AVERAGE')
@@ -485,9 +485,10 @@ class LoadExtractionApp:
 
         files_card = self._card(left, '📁  Files & Output')
         files_card.pack(fill='x')
-        self.bdf_widget = self._file_row(files_card, '📄  BDF File',         self._browse_bdf)
-        self.h5_widget  = self._file_row(files_card, '📊  H5 File',          self._browse_h5)
-        self.out_widget = self._file_row(files_card, '📁  Output Directory',  self._browse_output,
+        self.bdf_widget  = self._file_row(files_card, '📄  BDF File', self._browse_bdf)
+        self.h5_listbox  = self._multifile_row(files_card, '📊  H5 Files',
+                                               self._browse_h5, self._clear_h5)
+        self.out_widget  = self._file_row(files_card, '📁  Output Directory', self._browse_output,
                                           is_dir=True)
         tk.Frame(files_card, height=6, bg=self.COLORS['surface']).pack()
 
@@ -596,6 +597,35 @@ class LoadExtractionApp:
                  highlightthickness=1).pack(side='left')
         return entry
 
+    def _multifile_row(self, parent, label, add_cmd, clear_cmd):
+        row = tk.Frame(parent, bg=self.COLORS['surface'])
+        row.pack(fill='x', padx=14, pady=(0, 10))
+        tk.Label(row, text=label, font=('Segoe UI', 9),
+                 bg=self.COLORS['surface'], fg=self.COLORS['muted']
+                 ).pack(anchor='w', pady=(0, 3))
+        lb = tk.Listbox(row, font=('Segoe UI', 9),
+                        bg=self.COLORS['surface2'], fg=self.COLORS['text'],
+                        relief='flat', bd=0, height=3,
+                        highlightbackground=self.COLORS['border'],
+                        highlightthickness=1,
+                        selectbackground=self.COLORS['accent'])
+        lb.pack(fill='x', pady=(0, 4))
+        btns = tk.Frame(row, bg=self.COLORS['surface'])
+        btns.pack(fill='x')
+        tk.Button(btns, text='Add Files', command=add_cmd,
+                 bg=self.COLORS['surface2'], fg=self.COLORS['accent'],
+                 font=('Segoe UI', 9, 'bold'), relief='flat', cursor='hand2',
+                 padx=14, pady=4,
+                 highlightbackground=self.COLORS['border'],
+                 highlightthickness=1).pack(side='left', padx=(0, 6))
+        tk.Button(btns, text='Clear', command=clear_cmd,
+                 bg=self.COLORS['surface2'], fg=self.COLORS['muted'],
+                 font=('Segoe UI', 9), relief='flat', cursor='hand2',
+                 padx=14, pady=4,
+                 highlightbackground=self.COLORS['border'],
+                 highlightthickness=1).pack(side='left')
+        return lb
+
     def _param_entry(self, parent, label, hint):
         frame = tk.Frame(parent, bg=self.COLORS['bg'])
         frame.pack(fill='x', pady=(0, 12))
@@ -652,12 +682,16 @@ class LoadExtractionApp:
             self.bdf_widget.insert(0, f'✓  {os.path.basename(path)}')
 
     def _browse_h5(self):
-        path = filedialog.askopenfilename(title='Select H5 File',
-                                          filetypes=[('H5 Files', '*.h5')])
-        if path:
-            self.h5_path = path
-            self.h5_widget.delete(0, tk.END)
-            self.h5_widget.insert(0, f'✓  {os.path.basename(path)}')
+        paths = filedialog.askopenfilenames(title='Select H5 Files',
+                                            filetypes=[('H5 Files', '*.h5')])
+        for path in paths:
+            if path not in self.h5_paths:
+                self.h5_paths.append(path)
+                self.h5_listbox.insert(tk.END, os.path.basename(path))
+
+    def _clear_h5(self):
+        self.h5_paths.clear()
+        self.h5_listbox.delete(0, tk.END)
 
     def _browse_output(self):
         path = filedialog.askdirectory(title='Select Output Directory')
@@ -713,8 +747,8 @@ class LoadExtractionApp:
         if not self.output_dir:
             messagebox.showerror('Hata', 'Çıktı klasörünü seçin!')
             return
-        if not self.bdf_path or not self.h5_path:
-            messagebox.showerror('Hata', 'BDF ve H5 dosyalarını seçin!')
+        if not self.bdf_path or not self.h5_paths:
+            messagebox.showerror('Hata', 'BDF ve en az bir H5 dosyası seçin!')
             return
 
         self.run_btn.config(state='disabled', text='⏳ Çalışıyor...')
@@ -783,39 +817,6 @@ class LoadExtractionApp:
             thetarad_map = compute_thetarad_from_bdf(bdf)
             self.logger.info(f'✓ {len(thetarad_map)} element için açı hesaplandı')
 
-        # ── Read H5 ───────────────────────────────────────────────────────
-        self.logger.info('📂 H5 dosyası okunuyor...')
-        with h5py.File(self.h5_path, 'r') as h5:
-            domain_to_subcase = self._read_domains(h5)
-
-            ef = h5['NASTRAN/RESULT/ELEMENTAL/ELEMENT_FORCE']
-
-            # CQUAD4
-            q4 = ef['QUAD4']
-            q4_dom = np.array(q4['DOMAIN_ID'])
-            q4_eid = np.array(q4['EID'])
-            q4_MX  = np.array(q4['MX']);  q4_MY  = np.array(q4['MY']);  q4_MXY = np.array(q4['MXY'])
-            q4_BMX = np.array(q4['BMX']); q4_BMY = np.array(q4['BMY']); q4_BMXY = np.array(q4['BMXY'])
-
-            # CTRIA3  (may not exist in every H5)
-            has_tria3 = 'TRIA3' in ef
-            if has_tria3:
-                t3 = ef['TRIA3']
-                t3_dom = np.array(t3['DOMAIN_ID'])
-                t3_eid = np.array(t3['EID'])
-                t3_MX  = np.array(t3['MX']);  t3_MY  = np.array(t3['MY']);  t3_MXY = np.array(t3['MXY'])
-                t3_BMX = np.array(t3['BMX']); t3_BMY = np.array(t3['BMY']); t3_BMXY = np.array(t3['BMXY'])
-            else:
-                self.logger.info('ℹ️  H5 içinde TRIA3 verisi bulunamadı, atlanıyor')
-                t3_dom = t3_eid = np.array([])
-                t3_MX = t3_MY = t3_MXY = t3_BMX = t3_BMY = t3_BMXY = np.array([])
-        self.logger.info('✓ H5 dosyası okundu')
-
-        # ── Load case filter ──────────────────────────────────────────────
-        target_dids, target_sc = self._target_domains(domain_to_subcase,
-                                                       self.pshell_lc_entry)
-        self.logger.info(f'✓ {len(target_sc)} load case seçildi')
-
         # ── BDF geometry maps ─────────────────────────────────────────────
         elem_to_pid = {
             eid: elem.pid
@@ -849,66 +850,104 @@ class LoadExtractionApp:
         tgt_areas_arr = np.array([element_areas[e] for e in tgt_eids_list])
         tgt_thick_arr = np.array([property_thickness[p] for p in tgt_pids_list])
 
-        sources = [
-            ('CQUAD4', q4_dom, q4_eid, q4_MX, q4_MY, q4_MXY, q4_BMX, q4_BMY, q4_BMXY),
-        ]
-        if has_tria3:
-            sources.append(('CTRIA3', t3_dom, t3_eid, t3_MX, t3_MY, t3_MXY, t3_BMX, t3_BMY, t3_BMXY))
-
         self.logger.info('🔄 Element forces işleniyor (CQUAD4 + CTRIA3)...')
         elem_chunks = []
         # pf_accum[lc_did] = (n_pids, 6) array  [Nx, Ny, Nxy, Mx, My, Mxy] × area
         pf_accum = {}
+        # Collect domain→subcase mapping across all files (needed for Average_Load)
+        combined_domain_to_subcase = {}
 
-        for etype, dom_arr, eid_arr, MX_arr, MY_arr, MXY_arr, BMX_arr, BMY_arr, BMXY_arr in sources:
-            for lc_did in np.unique(dom_arr):
-                if int(lc_did) not in target_dids:
-                    continue
+        # ── Determine target load cases across all H5 files ───────────────
+        all_subcases_combined = set()
+        for h5_path in self.h5_paths:
+            with h5py.File(h5_path, 'r') as h5:
+                d2s = self._read_domains(h5)
+                all_subcases_combined.update(d2s.values())
+        lc_str_all = self.pshell_lc_entry.get().strip()
+        target_sc_all = set(parse_id_input(lc_str_all, list(all_subcases_combined)))
+        if not target_sc_all:
+            target_sc_all = all_subcases_combined
+        self.logger.info(f'✓ {len(target_sc_all)} load case seçildi')
 
-                lc_mask  = dom_arr == lc_did
-                lc_eids  = eid_arr[lc_mask]
-                lc_MX    = MX_arr[lc_mask].copy()
-                lc_MY    = MY_arr[lc_mask].copy()
-                lc_MXY   = MXY_arr[lc_mask].copy()
-                lc_BMX   = BMX_arr[lc_mask].copy()
-                lc_BMY   = BMY_arr[lc_mask].copy()
-                lc_BMXY  = BMXY_arr[lc_mask].copy()
+        for h5_path in self.h5_paths:
+            src_name = os.path.basename(h5_path)
+            self.logger.info(f'📂 H5 okunuyor: {src_name}')
+            with h5py.File(h5_path, 'r') as h5:
+                domain_to_subcase = self._read_domains(h5)
+                combined_domain_to_subcase.update(domain_to_subcase)
 
-                if is_material and thetarad_map:
-                    thetas = np.array([thetarad_map.get(e, 0.0) for e in lc_eids.tolist()])
-                    lc_MX,  lc_MY,  lc_MXY  = transf_Mohr(lc_MX,  lc_MY,  lc_MXY,  thetas)
-                    lc_BMX, lc_BMY, lc_BMXY = transf_Mohr(lc_BMX, lc_BMY, lc_BMXY, thetas)
+                target_dids = {did for did, sc in domain_to_subcase.items() if sc in target_sc_all}
 
-                lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
-                eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
+                ef = h5['NASTRAN/RESULT/ELEMENTAL/ELEMENT_FORCE']
 
-                # Vectorized: find LC indices for all target elements at once
-                v_idxs = np.array([eid_to_idx.get(int(e), -1) for e in tgt_eids_arr])
-                valid  = v_idxs >= 0
-                if not valid.any():
-                    continue
-                sel    = v_idxs[valid]
-                nx  = lc_MX[sel].astype(float);   ny  = lc_MY[sel].astype(float)
-                nxy = lc_MXY[sel].astype(float);  mx  = lc_BMX[sel].astype(float)
-                my  = lc_BMY[sel].astype(float);  mxy = lc_BMXY[sel].astype(float)
-                areas  = tgt_areas_arr[valid]
-                ridxs  = tgt_ridx_arr[valid]
+                q4 = ef['QUAD4']
+                q4_dom = np.array(q4['DOMAIN_ID']); q4_eid = np.array(q4['EID'])
+                q4_MX  = np.array(q4['MX']);  q4_MY  = np.array(q4['MY']);  q4_MXY = np.array(q4['MXY'])
+                q4_BMX = np.array(q4['BMX']); q4_BMY = np.array(q4['BMY']); q4_BMXY = np.array(q4['BMXY'])
 
-                # Accumulate property forces with np.add.at (no Python dict +=)
-                pf = pf_accum.setdefault(lc_did, np.zeros((n_pids, 6)))
-                np.add.at(pf, ridxs, np.column_stack(
-                    [nx*areas, ny*areas, nxy*areas, mx*areas, my*areas, mxy*areas]))
+                has_tria3 = 'TRIA3' in ef
+                if has_tria3:
+                    t3 = ef['TRIA3']
+                    t3_dom = np.array(t3['DOMAIN_ID']); t3_eid = np.array(t3['EID'])
+                    t3_MX  = np.array(t3['MX']);  t3_MY  = np.array(t3['MY']);  t3_MXY = np.array(t3['MXY'])
+                    t3_BMX = np.array(t3['BMX']); t3_BMY = np.array(t3['BMY']); t3_BMXY = np.array(t3['BMXY'])
+                else:
+                    t3_dom = t3_eid = np.array([])
+                    t3_MX = t3_MY = t3_MXY = t3_BMX = t3_BMY = t3_BMXY = np.array([])
 
-                # Build element chunk as column-dict DataFrame (faster than list-of-dicts)
-                elem_chunks.append(pd.DataFrame({
-                    'Property ID':  tgt_pids_arr[valid],
-                    'Element ID':   tgt_eids_arr[valid],
-                    'Element Type': etype,
-                    'Load Case ID': lc_name,
-                    'Nx': nx, 'Ny': ny, 'Nxy': nxy,
-                    'Mx': mx, 'My': my, 'Mxy': mxy,
-                    'Thickness': tgt_thick_arr[valid],
-                }))
+            self.logger.info(f'✓ {src_name} okundu')
+
+            sources = [('CQUAD4', q4_dom, q4_eid, q4_MX, q4_MY, q4_MXY, q4_BMX, q4_BMY, q4_BMXY)]
+            if has_tria3:
+                sources.append(('CTRIA3', t3_dom, t3_eid, t3_MX, t3_MY, t3_MXY, t3_BMX, t3_BMY, t3_BMXY))
+
+            for etype, dom_arr, eid_arr, MX_arr, MY_arr, MXY_arr, BMX_arr, BMY_arr, BMXY_arr in sources:
+                for lc_did in np.unique(dom_arr):
+                    if int(lc_did) not in target_dids:
+                        continue
+
+                    lc_mask  = dom_arr == lc_did
+                    lc_eids  = eid_arr[lc_mask]
+                    lc_MX    = MX_arr[lc_mask].copy()
+                    lc_MY    = MY_arr[lc_mask].copy()
+                    lc_MXY   = MXY_arr[lc_mask].copy()
+                    lc_BMX   = BMX_arr[lc_mask].copy()
+                    lc_BMY   = BMY_arr[lc_mask].copy()
+                    lc_BMXY  = BMXY_arr[lc_mask].copy()
+
+                    if is_material and thetarad_map:
+                        thetas = np.array([thetarad_map.get(e, 0.0) for e in lc_eids.tolist()])
+                        lc_MX,  lc_MY,  lc_MXY  = transf_Mohr(lc_MX,  lc_MY,  lc_MXY,  thetas)
+                        lc_BMX, lc_BMY, lc_BMXY = transf_Mohr(lc_BMX, lc_BMY, lc_BMXY, thetas)
+
+                    lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
+                    eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
+
+                    v_idxs = np.array([eid_to_idx.get(int(e), -1) for e in tgt_eids_arr])
+                    valid  = v_idxs >= 0
+                    if not valid.any():
+                        continue
+                    sel    = v_idxs[valid]
+                    nx  = lc_MX[sel].astype(float);   ny  = lc_MY[sel].astype(float)
+                    nxy = lc_MXY[sel].astype(float);  mx  = lc_BMX[sel].astype(float)
+                    my  = lc_BMY[sel].astype(float);  mxy = lc_BMXY[sel].astype(float)
+                    areas  = tgt_areas_arr[valid]
+                    ridxs  = tgt_ridx_arr[valid]
+
+                    pf = pf_accum.setdefault(lc_did, np.zeros((n_pids, 6)))
+                    np.add.at(pf, ridxs, np.column_stack(
+                        [nx*areas, ny*areas, nxy*areas, mx*areas, my*areas, mxy*areas]))
+
+                    elem_chunks.append(pd.DataFrame({
+                        'Property ID':  tgt_pids_arr[valid],
+                        'Element ID':   tgt_eids_arr[valid],
+                        'Element Type': etype,
+                        'Load Case ID': lc_name,
+                        'Source File':  src_name,
+                        'Nx': nx, 'Ny': ny, 'Nxy': nxy,
+                        'Mx': mx, 'My': my, 'Mxy': mxy,
+                        'Thickness': tgt_thick_arr[valid],
+                    }))
 
         # ── Element_Load.csv ──────────────────────────────────────────────
         df_elem = pd.concat(elem_chunks, ignore_index=True) if elem_chunks else pd.DataFrame()
@@ -937,7 +976,7 @@ class LoadExtractionApp:
         avg_thick_arr = np.array([property_thickness[p]       for p in pid_list])
         average_data = []
         for lc_did, pf in pf_accum.items():
-            lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
+            lc_name = combined_domain_to_subcase.get(int(lc_did), int(lc_did))
             avg = pf / avg_area_arr[:, None]   # (n_pids, 6) / (n_pids, 1)
             for i, pid in enumerate(pid_list):
                 average_data.append({
@@ -1003,97 +1042,116 @@ class LoadExtractionApp:
                 element_areas[eid]  = area
                 property_areas[elem.pid] = property_areas.get(elem.pid, 0.0) + area
 
-        self.logger.info('📂 H5 dosyası okunuyor...')
-        with h5py.File(self.h5_path, 'r') as h5:
-            domain_to_subcase = self._read_domains(h5)
-            stress_grp = h5.get('NASTRAN/RESULT/ELEMENTAL/STRESS')
-            has_q4 = stress_grp is not None and 'QUAD4' in stress_grp
-            has_t3 = stress_grp is not None and 'TRIA3' in stress_grp
-            if has_q4:
-                sq4 = stress_grp['QUAD4']
-                sq4_dom = np.array(sq4['DOMAIN_ID']); sq4_eid = np.array(sq4['EID'])
-                sq4_X1 = np.array(sq4['X1']); sq4_Y1 = np.array(sq4['Y1']); sq4_XY1 = np.array(sq4['XY1'])
-                sq4_X2 = np.array(sq4['X2']); sq4_Y2 = np.array(sq4['Y2']); sq4_XY2 = np.array(sq4['XY2'])
-            else:
-                sq4_dom = sq4_eid = np.array([])
-                sq4_X1 = sq4_Y1 = sq4_XY1 = sq4_X2 = sq4_Y2 = sq4_XY2 = np.array([])
-            if has_t3:
-                st3 = stress_grp['TRIA3']
-                st3_dom = np.array(st3['DOMAIN_ID']); st3_eid = np.array(st3['EID'])
-                st3_X1 = np.array(st3['X1']); st3_Y1 = np.array(st3['Y1']); st3_XY1 = np.array(st3['XY1'])
-                st3_X2 = np.array(st3['X2']); st3_Y2 = np.array(st3['Y2']); st3_XY2 = np.array(st3['XY2'])
-            else:
-                st3_dom = st3_eid = np.array([])
-                st3_X1 = st3_Y1 = st3_XY1 = st3_X2 = st3_Y2 = st3_XY2 = np.array([])
-        self.logger.info('✓ H5 dosyası okundu')
-
-        if not has_q4 and not has_t3:
-            self.logger.info('⚠ Stress verisi bulunamadı (H5 içinde STRESS output yok)')
-            return
-
-        target_dids, target_sc = self._target_domains(domain_to_subcase, self.stress_lc_entry)
-        self.logger.info(f'✓ {len(target_sc)} load case seçildi')
+        # ── Collect target load cases across all H5 files ────────────────
+        all_subcases_stress = set()
+        for h5_path in self.h5_paths:
+            with h5py.File(h5_path, 'r') as h5:
+                d2s = self._read_domains(h5)
+                all_subcases_stress.update(d2s.values())
+        lc_str_s = self.stress_lc_entry.get().strip()
+        target_sc_stress = set(parse_id_input(lc_str_s, list(all_subcases_stress)))
+        if not target_sc_stress:
+            target_sc_stress = all_subcases_stress
+        self.logger.info(f'✓ {len(target_sc_stress)} load case seçildi')
 
         self.logger.info('🔄 Stress verileri işleniyor...')
         element_stress_data = []
-        property_stress = {
-            lc_did: {
-                pid: dict(sx1=0.,sy1=0.,sxy1=0.,vm1=0.,p1_1=0.,p2_1=0.,
-                          sx2=0.,sy2=0.,sxy2=0.,vm2=0.,p1_2=0.,p2_2=0.)
-                for pid in target_pids
-            }
-            for lc_did in target_dids
-        }
+        # property_stress keyed by (h5_path, lc_did) to allow multi-file accumulation
+        property_stress = {}
+        combined_domain_to_subcase_s = {}
 
-        stress_sources = []
-        if has_q4:
-            stress_sources.append(('CQUAD4', sq4_dom, sq4_eid, sq4_X1, sq4_Y1, sq4_XY1, sq4_X2, sq4_Y2, sq4_XY2))
-        if has_t3:
-            stress_sources.append(('CTRIA3', st3_dom, st3_eid, st3_X1, st3_Y1, st3_XY1, st3_X2, st3_Y2, st3_XY2))
+        for h5_path in self.h5_paths:
+            src_name = os.path.basename(h5_path)
+            self.logger.info(f'📂 H5 okunuyor: {src_name}')
+            with h5py.File(h5_path, 'r') as h5:
+                domain_to_subcase = self._read_domains(h5)
+                combined_domain_to_subcase_s.update(domain_to_subcase)
+                target_dids = {did for did, sc in domain_to_subcase.items() if sc in target_sc_stress}
 
-        for etype, dom_arr, eid_arr, X1a, Y1a, XY1a, X2a, Y2a, XY2a in stress_sources:
-            for lc_did in np.unique(dom_arr):
-                if int(lc_did) not in target_dids:
-                    continue
-                lc_mask = dom_arr == lc_did
-                lc_eids = eid_arr[lc_mask]
-                lc_X1 = X1a[lc_mask].copy(); lc_Y1 = Y1a[lc_mask].copy(); lc_XY1 = XY1a[lc_mask].copy()
-                lc_X2 = X2a[lc_mask].copy(); lc_Y2 = Y2a[lc_mask].copy(); lc_XY2 = XY2a[lc_mask].copy()
-                if is_material and thetarad_map:
-                    thetas = np.array([thetarad_map.get(e, 0.0) for e in lc_eids.tolist()])
-                    lc_X1, lc_Y1, lc_XY1 = transf_Mohr(lc_X1, lc_Y1, lc_XY1, thetas)
-                    lc_X2, lc_Y2, lc_XY2 = transf_Mohr(lc_X2, lc_Y2, lc_XY2, thetas)
-                lc_VM1  = np.sqrt(lc_X1**2 - lc_X1*lc_Y1 + lc_Y1**2 + 3*lc_XY1**2)
-                lc_VM2  = np.sqrt(lc_X2**2 - lc_X2*lc_Y2 + lc_Y2**2 + 3*lc_XY2**2)
-                ctr1    = (lc_X1 + lc_Y1) / 2.0
-                R1      = np.sqrt(((lc_X1 - lc_Y1) / 2.0)**2 + lc_XY1**2)
-                lc_P1_1 = ctr1 + R1;  lc_P2_1 = ctr1 - R1
-                ctr2    = (lc_X2 + lc_Y2) / 2.0
-                R2      = np.sqrt(((lc_X2 - lc_Y2) / 2.0)**2 + lc_XY2**2)
-                lc_P1_2 = ctr2 + R2;  lc_P2_2 = ctr2 - R2
-                lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
-                eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
-                ps_lc      = property_stress.get(lc_did, {})
-                for eid, pid in elem_to_pid.items():
-                    idx = eid_to_idx.get(eid)
-                    if idx is None:
+                stress_grp = h5.get('NASTRAN/RESULT/ELEMENTAL/STRESS')
+                has_q4 = stress_grp is not None and 'QUAD4' in stress_grp
+                has_t3 = stress_grp is not None and 'TRIA3' in stress_grp
+                if has_q4:
+                    sq4 = stress_grp['QUAD4']
+                    sq4_dom = np.array(sq4['DOMAIN_ID']); sq4_eid = np.array(sq4['EID'])
+                    sq4_X1 = np.array(sq4['X1']); sq4_Y1 = np.array(sq4['Y1']); sq4_XY1 = np.array(sq4['XY1'])
+                    sq4_X2 = np.array(sq4['X2']); sq4_Y2 = np.array(sq4['Y2']); sq4_XY2 = np.array(sq4['XY2'])
+                else:
+                    sq4_dom = sq4_eid = np.array([])
+                    sq4_X1 = sq4_Y1 = sq4_XY1 = sq4_X2 = sq4_Y2 = sq4_XY2 = np.array([])
+                if has_t3:
+                    st3 = stress_grp['TRIA3']
+                    st3_dom = np.array(st3['DOMAIN_ID']); st3_eid = np.array(st3['EID'])
+                    st3_X1 = np.array(st3['X1']); st3_Y1 = np.array(st3['Y1']); st3_XY1 = np.array(st3['XY1'])
+                    st3_X2 = np.array(st3['X2']); st3_Y2 = np.array(st3['Y2']); st3_XY2 = np.array(st3['XY2'])
+                else:
+                    st3_dom = st3_eid = np.array([])
+                    st3_X1 = st3_Y1 = st3_XY1 = st3_X2 = st3_Y2 = st3_XY2 = np.array([])
+            self.logger.info(f'✓ {src_name} okundu')
+
+            if not has_q4 and not has_t3:
+                self.logger.info(f'⚠ {src_name} içinde STRESS output yok, atlanıyor')
+                continue
+
+            # Init property_stress entries for this file's target domains
+            for lc_did in target_dids:
+                if lc_did not in property_stress:
+                    property_stress[lc_did] = {
+                        pid: dict(sx1=0.,sy1=0.,sxy1=0.,vm1=0.,p1_1=0.,p2_1=0.,
+                                  sx2=0.,sy2=0.,sxy2=0.,vm2=0.,p1_2=0.,p2_2=0.)
+                        for pid in target_pids
+                    }
+
+            stress_sources = []
+            if has_q4:
+                stress_sources.append(('CQUAD4', sq4_dom, sq4_eid, sq4_X1, sq4_Y1, sq4_XY1, sq4_X2, sq4_Y2, sq4_XY2))
+            if has_t3:
+                stress_sources.append(('CTRIA3', st3_dom, st3_eid, st3_X1, st3_Y1, st3_XY1, st3_X2, st3_Y2, st3_XY2))
+
+            for etype, dom_arr, eid_arr, X1a, Y1a, XY1a, X2a, Y2a, XY2a in stress_sources:
+                for lc_did in np.unique(dom_arr):
+                    if int(lc_did) not in target_dids:
                         continue
-                    area  = element_areas[eid]
-                    sx1   = float(lc_X1[idx]);  sy1  = float(lc_Y1[idx]);  sxy1 = float(lc_XY1[idx])
-                    vm1   = float(lc_VM1[idx]); p1_1 = float(lc_P1_1[idx]); p2_1 = float(lc_P2_1[idx])
-                    sx2   = float(lc_X2[idx]);  sy2  = float(lc_Y2[idx]);  sxy2 = float(lc_XY2[idx])
-                    vm2   = float(lc_VM2[idx]); p1_2 = float(lc_P1_2[idx]); p2_2 = float(lc_P2_2[idx])
-                    if pid in ps_lc:
-                        ps = ps_lc[pid]
-                        ps['sx1']  += sx1*area;  ps['sy1']  += sy1*area;  ps['sxy1'] += sxy1*area
-                        ps['vm1']  += vm1*area;  ps['p1_1'] += p1_1*area; ps['p2_1'] += p2_1*area
-                        ps['sx2']  += sx2*area;  ps['sy2']  += sy2*area;  ps['sxy2'] += sxy2*area
-                        ps['vm2']  += vm2*area;  ps['p1_2'] += p1_2*area; ps['p2_2'] += p2_2*area
-                    element_stress_data.append({
-                        'Property ID': pid, 'Element ID': eid, 'Element Type': etype, 'Load Case ID': lc_name,
-                        'Sx_Z1': sx1, 'Sy_Z1': sy1, 'Sxy_Z1': sxy1, 'VM_Z1': vm1, 'P1_Z1': p1_1, 'P2_Z1': p2_1,
-                        'Sx_Z2': sx2, 'Sy_Z2': sy2, 'Sxy_Z2': sxy2, 'VM_Z2': vm2, 'P1_Z2': p1_2, 'P2_Z2': p2_2,
-                    })
+                    lc_mask = dom_arr == lc_did
+                    lc_eids = eid_arr[lc_mask]
+                    lc_X1 = X1a[lc_mask].copy(); lc_Y1 = Y1a[lc_mask].copy(); lc_XY1 = XY1a[lc_mask].copy()
+                    lc_X2 = X2a[lc_mask].copy(); lc_Y2 = Y2a[lc_mask].copy(); lc_XY2 = XY2a[lc_mask].copy()
+                    if is_material and thetarad_map:
+                        thetas = np.array([thetarad_map.get(e, 0.0) for e in lc_eids.tolist()])
+                        lc_X1, lc_Y1, lc_XY1 = transf_Mohr(lc_X1, lc_Y1, lc_XY1, thetas)
+                        lc_X2, lc_Y2, lc_XY2 = transf_Mohr(lc_X2, lc_Y2, lc_XY2, thetas)
+                    lc_VM1  = np.sqrt(lc_X1**2 - lc_X1*lc_Y1 + lc_Y1**2 + 3*lc_XY1**2)
+                    lc_VM2  = np.sqrt(lc_X2**2 - lc_X2*lc_Y2 + lc_Y2**2 + 3*lc_XY2**2)
+                    ctr1    = (lc_X1 + lc_Y1) / 2.0
+                    R1      = np.sqrt(((lc_X1 - lc_Y1) / 2.0)**2 + lc_XY1**2)
+                    lc_P1_1 = ctr1 + R1;  lc_P2_1 = ctr1 - R1
+                    ctr2    = (lc_X2 + lc_Y2) / 2.0
+                    R2      = np.sqrt(((lc_X2 - lc_Y2) / 2.0)**2 + lc_XY2**2)
+                    lc_P1_2 = ctr2 + R2;  lc_P2_2 = ctr2 - R2
+                    lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
+                    eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
+                    ps_lc      = property_stress.get(lc_did, {})
+                    for eid, pid in elem_to_pid.items():
+                        idx = eid_to_idx.get(eid)
+                        if idx is None:
+                            continue
+                        area  = element_areas[eid]
+                        sx1   = float(lc_X1[idx]);  sy1  = float(lc_Y1[idx]);  sxy1 = float(lc_XY1[idx])
+                        vm1   = float(lc_VM1[idx]); p1_1 = float(lc_P1_1[idx]); p2_1 = float(lc_P2_1[idx])
+                        sx2   = float(lc_X2[idx]);  sy2  = float(lc_Y2[idx]);  sxy2 = float(lc_XY2[idx])
+                        vm2   = float(lc_VM2[idx]); p1_2 = float(lc_P1_2[idx]); p2_2 = float(lc_P2_2[idx])
+                        if pid in ps_lc:
+                            ps = ps_lc[pid]
+                            ps['sx1']  += sx1*area;  ps['sy1']  += sy1*area;  ps['sxy1'] += sxy1*area
+                            ps['vm1']  += vm1*area;  ps['p1_1'] += p1_1*area; ps['p2_1'] += p2_1*area
+                            ps['sx2']  += sx2*area;  ps['sy2']  += sy2*area;  ps['sxy2'] += sxy2*area
+                            ps['vm2']  += vm2*area;  ps['p1_2'] += p1_2*area; ps['p2_2'] += p2_2*area
+                        element_stress_data.append({
+                            'Property ID': pid, 'Element ID': eid, 'Element Type': etype,
+                            'Load Case ID': lc_name, 'Source File': src_name,
+                            'Sx_Z1': sx1, 'Sy_Z1': sy1, 'Sxy_Z1': sxy1, 'VM_Z1': vm1, 'P1_Z1': p1_1, 'P2_Z1': p2_1,
+                            'Sx_Z2': sx2, 'Sy_Z2': sy2, 'Sxy_Z2': sxy2, 'VM_Z2': vm2, 'P1_Z2': p1_2, 'P2_Z2': p2_2,
+                        })
 
         if not element_stress_data:
             self.logger.info('⚠ Seçili elementler için stress verisi bulunamadı')
@@ -1105,7 +1163,7 @@ class LoadExtractionApp:
 
         average_stress_data = []
         for lc_did, ps_dict in property_stress.items():
-            lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
+            lc_name = combined_domain_to_subcase_s.get(int(lc_did), int(lc_did))
             for pid, ps in ps_dict.items():
                 ta = property_areas.get(pid, 0.0)
                 if ta == 0.0:
@@ -1162,19 +1220,6 @@ class LoadExtractionApp:
             if elem.type in ('CQUAD4', 'CTRIA3') and elem.pid in target_pids:
                 pid_to_nodes.setdefault(elem.pid, set()).update(elem.node_ids)
 
-        self.logger.info('📂 H5 dosyası okunuyor...')
-        with h5py.File(self.h5_path, 'r') as h5:
-            domain_to_subcase = self._read_domains(h5)
-            disp_ds   = h5['NASTRAN/RESULT/NODAL/DISPLACEMENT']
-            d_dom     = np.array(disp_ds['DOMAIN_ID'])
-            d_nid     = np.array(disp_ds['ID'])
-            d_X       = np.array(disp_ds['X']);  d_Y  = np.array(disp_ds['Y']);  d_Z  = np.array(disp_ds['Z'])
-            d_RX      = np.array(disp_ds['RX']); d_RY = np.array(disp_ds['RY']); d_RZ = np.array(disp_ds['RZ'])
-        self.logger.info('✓ H5 dosyası okundu')
-
-        target_dids, target_sc = self._target_domains(domain_to_subcase, self.disp_lc_entry)
-        self.logger.info(f'✓ {len(target_sc)} load case seçildi')
-
         # Build flat (nid, pid) arrays once — enables vectorized indexing inside LC loop
         flat_nids = np.array([int(nid)
                                for pid, nodes in pid_to_nodes.items()
@@ -1183,35 +1228,61 @@ class LoadExtractionApp:
                                for pid, nodes in pid_to_nodes.items()
                                for nid in nodes], dtype=np.int64)
 
+        # ── Collect target load cases across all H5 files ─────────────────
+        all_subcases_disp = set()
+        for h5_path in self.h5_paths:
+            with h5py.File(h5_path, 'r') as h5:
+                d2s = self._read_domains(h5)
+                all_subcases_disp.update(d2s.values())
+        lc_str_d = self.disp_lc_entry.get().strip()
+        target_sc_disp = set(parse_id_input(lc_str_d, list(all_subcases_disp)))
+        if not target_sc_disp:
+            target_sc_disp = all_subcases_disp
+        self.logger.info(f'✓ {len(target_sc_disp)} load case seçildi')
+
         self.logger.info('🔄 Displacement verileri işleniyor...')
         disp_chunks = []
-        for lc_did in np.unique(d_dom):
-            if int(lc_did) not in target_dids:
-                continue
-            lc_mask = d_dom == lc_did
-            lc_nids = d_nid[lc_mask]
-            lc_X    = d_X[lc_mask];  lc_Y  = d_Y[lc_mask];  lc_Z  = d_Z[lc_mask]
-            lc_RX   = d_RX[lc_mask]; lc_RY = d_RY[lc_mask]; lc_RZ = d_RZ[lc_mask]
-            lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
 
-            # Build nid→row index dict, then vectorized lookup for all flat pairs
-            nid_to_idx_lc = {int(n): i for i, n in enumerate(lc_nids)}
-            v_idxs = np.array([nid_to_idx_lc.get(int(n), -1) for n in flat_nids])
-            valid  = v_idxs >= 0
-            if not valid.any():
-                continue
-            sel    = v_idxs[valid]
-            x = lc_X[sel];  y = lc_Y[sel];  z = lc_Z[sel]
-            rx = lc_RX[sel]; ry = lc_RY[sel]; rz = lc_RZ[sel]
-            mag = np.sqrt(x**2 + y**2 + z**2)
-            disp_chunks.append(pd.DataFrame({
-                'Property ID':  flat_pids[valid],
-                'Node ID':      flat_nids[valid],
-                'Load Case ID': lc_name,
-                'X': x, 'Y': y, 'Z': z,
-                'Magnitude':    mag,
-                'Rx': rx, 'Ry': ry, 'Rz': rz,
-            }))
+        for h5_path in self.h5_paths:
+            src_name = os.path.basename(h5_path)
+            self.logger.info(f'📂 H5 okunuyor: {src_name}')
+            with h5py.File(h5_path, 'r') as h5:
+                domain_to_subcase = self._read_domains(h5)
+                target_dids = {did for did, sc in domain_to_subcase.items() if sc in target_sc_disp}
+                disp_ds   = h5['NASTRAN/RESULT/NODAL/DISPLACEMENT']
+                d_dom     = np.array(disp_ds['DOMAIN_ID'])
+                d_nid     = np.array(disp_ds['ID'])
+                d_X       = np.array(disp_ds['X']);  d_Y  = np.array(disp_ds['Y']);  d_Z  = np.array(disp_ds['Z'])
+                d_RX      = np.array(disp_ds['RX']); d_RY = np.array(disp_ds['RY']); d_RZ = np.array(disp_ds['RZ'])
+            self.logger.info(f'✓ {src_name} okundu')
+
+            for lc_did in np.unique(d_dom):
+                if int(lc_did) not in target_dids:
+                    continue
+                lc_mask = d_dom == lc_did
+                lc_nids = d_nid[lc_mask]
+                lc_X    = d_X[lc_mask];  lc_Y  = d_Y[lc_mask];  lc_Z  = d_Z[lc_mask]
+                lc_RX   = d_RX[lc_mask]; lc_RY = d_RY[lc_mask]; lc_RZ = d_RZ[lc_mask]
+                lc_name = domain_to_subcase.get(int(lc_did), int(lc_did))
+
+                nid_to_idx_lc = {int(n): i for i, n in enumerate(lc_nids)}
+                v_idxs = np.array([nid_to_idx_lc.get(int(n), -1) for n in flat_nids])
+                valid  = v_idxs >= 0
+                if not valid.any():
+                    continue
+                sel    = v_idxs[valid]
+                x = lc_X[sel];  y = lc_Y[sel];  z = lc_Z[sel]
+                rx = lc_RX[sel]; ry = lc_RY[sel]; rz = lc_RZ[sel]
+                mag = np.sqrt(x**2 + y**2 + z**2)
+                disp_chunks.append(pd.DataFrame({
+                    'Property ID':  flat_pids[valid],
+                    'Node ID':      flat_nids[valid],
+                    'Load Case ID': lc_name,
+                    'Source File':  src_name,
+                    'X': x, 'Y': y, 'Z': z,
+                    'Magnitude':    mag,
+                    'Rx': rx, 'Ry': ry, 'Rz': rz,
+                }))
 
         df_all = pd.concat(disp_chunks, ignore_index=True) if disp_chunks else pd.DataFrame()
         df_all.to_csv(os.path.join(self.output_dir, 'Displacement_All.csv'), index=False)
@@ -1232,20 +1303,19 @@ class LoadExtractionApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_bush(self):
-        # ── Read H5 to discover all element IDs ───────────────────────────
-        self.logger.info('📂 H5 dosyası okunuyor...')
-        with h5py.File(self.h5_path, 'r') as h5:
-            domain_to_subcase = self._read_domains(h5)
-            cbush       = h5['NASTRAN/RESULT/ELEMENTAL/ELEMENT_FORCE/BUSH']
-            dom_arr     = np.array(cbush['DOMAIN_ID'])
-            eid_arr     = np.array(cbush['EID'])
-            FX_arr      = np.array(cbush['FX'])
-            FY_arr      = np.array(cbush['FY'])
-            FZ_arr      = np.array(cbush['FZ'])
-        self.logger.info('✓ H5 dosyası okundu')
+        # ── Read all H5 files to collect element IDs and LC IDs ──────────
+        self.logger.info(f'📂 {len(self.h5_paths)} H5 dosyası yükleniyor...')
+        all_eids_set = set()
+        all_subcases_bush = set()
+        for h5_path in self.h5_paths:
+            with h5py.File(h5_path, 'r') as h5:
+                d2s = self._read_domains(h5)
+                all_subcases_bush.update(d2s.values())
+                cbush = h5['NASTRAN/RESULT/ELEMENTAL/ELEMENT_FORCE/BUSH']
+                all_eids_set.update(int(e) for e in np.array(cbush['EID']))
 
         # ── Element ID filter ─────────────────────────────────────────────
-        all_eids   = list({int(e) for e in eid_arr})
+        all_eids   = list(all_eids_set)
         elem_str   = self.bush_elem_entry.get().strip()
         target_eids = set(parse_id_input(elem_str, all_eids))
         if not target_eids:
@@ -1253,36 +1323,53 @@ class LoadExtractionApp:
         self.logger.info(f'✓ {len(target_eids)} element ID seçildi')
 
         # ── Load case filter ──────────────────────────────────────────────
-        target_dids, target_sc = self._target_domains(domain_to_subcase,
-                                                       self.bush_lc_entry)
-        self.logger.info(f'✓ {len(target_sc)} load case seçildi')
+        lc_str_b = self.bush_lc_entry.get().strip()
+        target_sc_bush = set(parse_id_input(lc_str_b, list(all_subcases_bush)))
+        if not target_sc_bush:
+            target_sc_bush = all_subcases_bush
+        self.logger.info(f'✓ {len(target_sc_bush)} load case seçildi')
 
-        # ── Extract forces ────────────────────────────────────────────────
+        # ── Extract forces across all H5 files ────────────────────────────
         self.logger.info('🔄 Bush force verileri çıkarılıyor...')
         bush_data = []
 
-        for lc_did in np.unique(dom_arr):
-            if int(lc_did) not in target_dids:
-                continue
-            lc_mask    = dom_arr == lc_did
-            lc_eids    = eid_arr[lc_mask]
-            lc_FX      = FX_arr[lc_mask]
-            lc_FY      = FY_arr[lc_mask]
-            lc_FZ      = FZ_arr[lc_mask]
-            lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
-            eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
+        for h5_path in self.h5_paths:
+            src_name = os.path.basename(h5_path)
+            self.logger.info(f'📂 H5 okunuyor: {src_name}')
+            with h5py.File(h5_path, 'r') as h5:
+                domain_to_subcase = self._read_domains(h5)
+                target_dids = {did for did, sc in domain_to_subcase.items() if sc in target_sc_bush}
+                cbush    = h5['NASTRAN/RESULT/ELEMENTAL/ELEMENT_FORCE/BUSH']
+                dom_arr  = np.array(cbush['DOMAIN_ID'])
+                eid_arr  = np.array(cbush['EID'])
+                FX_arr   = np.array(cbush['FX'])
+                FY_arr   = np.array(cbush['FY'])
+                FZ_arr   = np.array(cbush['FZ'])
+            self.logger.info(f'✓ {src_name} okundu')
 
-            for eid in target_eids:
-                idx = eid_to_idx.get(eid)
-                if idx is None:
+            for lc_did in np.unique(dom_arr):
+                if int(lc_did) not in target_dids:
                     continue
-                bush_data.append({
-                    'Element ID':   eid,
-                    'Load Case ID': lc_name,
-                    'FX': float(lc_FX[idx]),
-                    'FY': float(lc_FY[idx]),
-                    'FZ': float(lc_FZ[idx]),
-                })
+                lc_mask    = dom_arr == lc_did
+                lc_eids    = eid_arr[lc_mask]
+                lc_FX      = FX_arr[lc_mask]
+                lc_FY      = FY_arr[lc_mask]
+                lc_FZ      = FZ_arr[lc_mask]
+                lc_name    = domain_to_subcase.get(int(lc_did), int(lc_did))
+                eid_to_idx = {int(e): i for i, e in enumerate(lc_eids)}
+
+                for eid in target_eids:
+                    idx = eid_to_idx.get(eid)
+                    if idx is None:
+                        continue
+                    bush_data.append({
+                        'Element ID':   eid,
+                        'Load Case ID': lc_name,
+                        'Source File':  src_name,
+                        'FX': float(lc_FX[idx]),
+                        'FY': float(lc_FY[idx]),
+                        'FZ': float(lc_FZ[idx]),
+                    })
 
         # ── Bush_Load_Raw.csv ─────────────────────────────────────────────
         df_raw = pd.DataFrame(bush_data)

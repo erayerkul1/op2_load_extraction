@@ -267,7 +267,7 @@ class LoadExtractionApp:
         self.logger.setLevel(logging.INFO)
 
         self.input_entry_now    = ''
-        self.output_entry_now   = ''
+        self.op2_paths          = []   # list of selected OP2 file paths
         self.stress_output_now2 = ''
 
         self.pshell_property_ids = ''
@@ -279,8 +279,7 @@ class LoadExtractionApp:
 
         self._bdf_cache      = None
         self._bdf_path_cache = None
-        self._op2_cache      = None
-        self._op2_path_cache = None
+        self._op2_cache      = {}   # dict: path → OP2 object
 
         self.build_ui()
 
@@ -301,18 +300,16 @@ class LoadExtractionApp:
             self.logger.info("✓ BDF dosyası önbellekten alındı")
         return self._bdf_cache
 
-    def _load_op2(self):
-        path = self.output_entry_now
-        if self._op2_path_cache != path:
-            self.logger.info("📂 OP2 dosyası okunuyor...")
+    def _load_op2(self, path):
+        if path not in self._op2_cache:
+            self.logger.info(f"📂 OP2 okunuyor: {os.path.basename(path)}")
             op2 = OP2()
             op2.read_op2(path)
-            self._op2_cache      = op2
-            self._op2_path_cache = path
+            self._op2_cache[path] = op2
             self.logger.info("✓ OP2 dosyası okundu")
         else:
-            self.logger.info("✓ OP2 dosyası önbellekten alındı")
-        return self._op2_cache
+            self.logger.info(f"✓ OP2 önbellekten: {os.path.basename(path)}")
+        return self._op2_cache[path]
 
     def build_ui(self):
         self._build_header()
@@ -393,7 +390,8 @@ class LoadExtractionApp:
         files_card.pack(fill='x')
 
         self.bdf_display = self._file_row(files_card, '📄  BDF File', self._browse_bdf)
-        self.op2_display = self._file_row(files_card, '📊  OP2 File', self._browse_op2)
+        self.op2_listbox = self._multifile_row(files_card, '📊  OP2 Files',
+                                               self._browse_op2, self._clear_op2)
         self.out_display = self._file_row(files_card, '📁  Output Directory', self._browse_output, is_dir=True)
         tk.Frame(files_card, height=6, bg=self.COLORS['surface']).pack()
 
@@ -499,6 +497,35 @@ class LoadExtractionApp:
                  highlightthickness=1).pack(side='left')
         return entry
 
+    def _multifile_row(self, parent, label, add_cmd, clear_cmd):
+        row = tk.Frame(parent, bg=self.COLORS['surface'])
+        row.pack(fill='x', padx=14, pady=(0, 10))
+        tk.Label(row, text=label, font=('Segoe UI', 9),
+                 bg=self.COLORS['surface'], fg=self.COLORS['muted']
+                 ).pack(anchor='w', pady=(0, 3))
+        lb = tk.Listbox(row, font=('Segoe UI', 9),
+                        bg=self.COLORS['surface2'], fg=self.COLORS['text'],
+                        relief='flat', bd=0, height=3,
+                        highlightbackground=self.COLORS['border'],
+                        highlightthickness=1,
+                        selectbackground=self.COLORS['accent'])
+        lb.pack(fill='x', pady=(0, 4))
+        btns = tk.Frame(row, bg=self.COLORS['surface'])
+        btns.pack(fill='x')
+        tk.Button(btns, text='Add Files', command=add_cmd,
+                 bg=self.COLORS['surface2'], fg=self.COLORS['accent'],
+                 font=('Segoe UI', 9, 'bold'), relief='flat', cursor='hand2',
+                 padx=14, pady=4,
+                 highlightbackground=self.COLORS['border'],
+                 highlightthickness=1).pack(side='left', padx=(0, 6))
+        tk.Button(btns, text='Clear', command=clear_cmd,
+                 bg=self.COLORS['surface2'], fg=self.COLORS['muted'],
+                 font=('Segoe UI', 9), relief='flat', cursor='hand2',
+                 padx=14, pady=4,
+                 highlightbackground=self.COLORS['border'],
+                 highlightthickness=1).pack(side='left')
+        return lb
+
     def _param_entry(self, parent, label, hint):
         frame = tk.Frame(parent, bg=self.COLORS['bg'])
         frame.pack(fill='x', pady=(0, 12))
@@ -558,12 +585,16 @@ class LoadExtractionApp:
             self.bdf_display.insert(0, f'✓  {os.path.basename(path)}')
 
     def _browse_op2(self):
-        path = filedialog.askopenfilename(title='Select OP2 File',
-                                          filetypes=[('OP2 Files', '*.op2')])
-        if path:
-            self.output_entry_now = path
-            self.op2_display.delete(0, tk.END)
-            self.op2_display.insert(0, f'✓  {os.path.basename(path)}')
+        paths = filedialog.askopenfilenames(title='Select OP2 Files',
+                                            filetypes=[('OP2 Files', '*.op2')])
+        for path in paths:
+            if path not in self.op2_paths:
+                self.op2_paths.append(path)
+                self.op2_listbox.insert(tk.END, os.path.basename(path))
+
+    def _clear_op2(self):
+        self.op2_paths.clear()
+        self.op2_listbox.delete(0, tk.END)
 
     def _browse_output(self):
         path = filedialog.askdirectory(title='Select Output Directory')
@@ -573,8 +604,7 @@ class LoadExtractionApp:
             self.out_display.insert(0, f'✓  {os.path.basename(path)}')
 
     # Backward-compat aliases
-    def bdf_input(self):      self._browse_bdf()
-    def op2_input(self):      self._browse_op2()
+    def bdf_input(self):       self._browse_bdf()
     def output_location(self): self._browse_output()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -620,8 +650,8 @@ class LoadExtractionApp:
         if not self.stress_output_now2:
             messagebox.showerror("Hata", "Çıktı klasörünü seçin!")
             return
-        if not self.input_entry_now or not self.output_entry_now:
-            messagebox.showerror("Hata", "BDF ve OP2 dosyalarını seçin")
+        if not self.input_entry_now or not self.op2_paths:
+            messagebox.showerror("Hata", "BDF ve en az bir OP2 dosyası seçin")
             return
 
         self.run_btn.config(state='disabled', text='⏳ Çalışıyor...')
@@ -673,7 +703,6 @@ class LoadExtractionApp:
             messagebox.showerror("Hata", "Property ID'leri girin (tüm için: ALL)")
             return
 
-        op2 = self._load_op2()
         bdf = self._load_bdf()
 
         self.logger.info("🔍 Property ID'leri parse ediliyor...")
@@ -690,20 +719,21 @@ class LoadExtractionApp:
             if (element.type == "CQUAD4" or element.type == "CTRIA3") and element.pid in target_property_ids
         }
 
-        all_lc_pshell = list(set(op2.cquad4_force.keys()).union(op2.ctria3_force.keys()))
-        lc_input_str = self.loadcase_id_entry.get().strip()
-        target_lc_ids = set(parse_id_input(lc_input_str, all_lc_pshell))
-        if not target_lc_ids:
-            target_lc_ids = set(all_lc_pshell)
-        self.logger.info(f"✓ {len(target_lc_ids)} load case seçildi")
+        # ── Load all OP2 files and collect LC IDs across all files ──────────
+        self.logger.info(f"📂 {len(self.op2_paths)} OP2 dosyası yükleniyor...")
+        all_op2s = {}
+        all_lc_pshell = set()
+        for op2_path in self.op2_paths:
+            op2 = self._load_op2(op2_path)
+            all_op2s[op2_path] = op2
+            all_lc_pshell.update(op2.cquad4_force.keys())
+            all_lc_pshell.update(op2.ctria3_force.keys())
 
-        property_forces = {
-            load_case_id: {
-                pid: {'Nx':0.0,'Ny':0.0,'Nxy':0.0,'Mx':0.0,'My':0.0,'Mxy':0.0}
-                for pid in target_property_ids
-            }
-            for load_case_id in set(op2.cquad4_force.keys()).union(op2.ctria3_force.keys())
-        }
+        lc_input_str = self.loadcase_id_entry.get().strip()
+        target_lc_ids = set(parse_id_input(lc_input_str, list(all_lc_pshell)))
+        if not target_lc_ids:
+            target_lc_ids = all_lc_pshell
+        self.logger.info(f"✓ {len(target_lc_ids)} load case seçildi")
 
         property_areas = {}
         element_areas = {}
@@ -727,8 +757,6 @@ class LoadExtractionApp:
         is_material_cid = self.coordinate_system.get() == "Material CID"
         coord_mode = "Material CID" if is_material_cid else "Element CID"
         self.logger.info(f"🔄 Koordinat sistemi: {coord_mode}")
-        op2_data = data_in_material_coord(bdf, op2, in_place=False) if is_material_cid else op2
-        self.logger.info("✓ Koordinat dönüşümü tamamlandı" if is_material_cid else "✓ Element CID kullanılacak")
 
         # ── Pre-build element mapping arrays once (outside all LC loops) ───
         pid_list      = sorted(set(target_property_ids))
@@ -748,41 +776,47 @@ class LoadExtractionApp:
         elem_chunks = []
         pf_accum    = {}   # lc_id → (n_pids, 6) array [Nx,Ny,Nxy,Mx,My,Mxy] × area
 
-        for force_dict, lc_label in [(op2_data.cquad4_force, 'CQUAD4'),
-                                     (op2_data.ctria3_force, 'CTRIA3')]:
-            for load_case_id, element_forces in force_dict.items():
-                if load_case_id not in target_lc_ids:
-                    continue
-                element_ids = element_forces.element
-                forces_data = element_forces.data[0]
-                load_id     = element_forces.loadIDs[0]
-                eid_to_idx  = {int(e): i for i, e in enumerate(element_ids)}
+        for op2_path, op2 in all_op2s.items():
+            src_name = os.path.basename(op2_path)
+            self.logger.info(f"  ▸ İşleniyor: {src_name}")
+            op2_data = data_in_material_coord(bdf, op2, in_place=False) if is_material_cid else op2
 
-                # Vectorized lookup for all target elements at once
-                v_idxs = np.array([eid_to_idx.get(int(e), -1) for e in tgt_eids_arr])
-                valid  = v_idxs >= 0
-                if not valid.any():
-                    continue
-                sel    = v_idxs[valid]
-                f_sub  = forces_data[sel]           # (n_valid, ≥6)
-                nx, ny, nxy = f_sub[:, 0], f_sub[:, 1], f_sub[:, 2]
-                mx, my, mxy = f_sub[:, 3], f_sub[:, 4], f_sub[:, 5]
-                areas  = tgt_areas_arr[valid]
-                ridxs  = tgt_ridx_arr[valid]
+            for force_dict, lc_label in [(op2_data.cquad4_force, 'CQUAD4'),
+                                         (op2_data.ctria3_force, 'CTRIA3')]:
+                for load_case_id, element_forces in force_dict.items():
+                    if load_case_id not in target_lc_ids:
+                        continue
+                    element_ids = element_forces.element
+                    forces_data = element_forces.data[0]
+                    load_id     = element_forces.loadIDs[0]
+                    eid_to_idx  = {int(e): i for i, e in enumerate(element_ids)}
 
-                # Accumulate property forces with np.add.at
-                pf = pf_accum.setdefault(load_id, np.zeros((n_pids, 6)))
-                np.add.at(pf, ridxs, np.column_stack(
-                    [nx*areas, ny*areas, nxy*areas, mx*areas, my*areas, mxy*areas]))
+                    # Vectorized lookup for all target elements at once
+                    v_idxs = np.array([eid_to_idx.get(int(e), -1) for e in tgt_eids_arr])
+                    valid  = v_idxs >= 0
+                    if not valid.any():
+                        continue
+                    sel    = v_idxs[valid]
+                    f_sub  = forces_data[sel]           # (n_valid, ≥6)
+                    nx, ny, nxy = f_sub[:, 0], f_sub[:, 1], f_sub[:, 2]
+                    mx, my, mxy = f_sub[:, 3], f_sub[:, 4], f_sub[:, 5]
+                    areas  = tgt_areas_arr[valid]
+                    ridxs  = tgt_ridx_arr[valid]
 
-                elem_chunks.append(pd.DataFrame({
-                    'Property ID':  tgt_pids_arr[valid],
-                    'Element ID':   tgt_eids_arr[valid],
-                    'Load Case ID': load_id,
-                    'Nx': nx, 'Ny': ny, 'Nxy': nxy,
-                    'Mx': mx, 'My': my, 'Mxy': mxy,
-                    'Thickness': tgt_thick_arr[valid],
-                }))
+                    # Accumulate property forces with np.add.at
+                    pf = pf_accum.setdefault(load_id, np.zeros((n_pids, 6)))
+                    np.add.at(pf, ridxs, np.column_stack(
+                        [nx*areas, ny*areas, nxy*areas, mx*areas, my*areas, mxy*areas]))
+
+                    elem_chunks.append(pd.DataFrame({
+                        'Property ID':  tgt_pids_arr[valid],
+                        'Element ID':   tgt_eids_arr[valid],
+                        'Load Case ID': load_id,
+                        'Source File':  src_name,
+                        'Nx': nx, 'Ny': ny, 'Nxy': nxy,
+                        'Mx': mx, 'My': my, 'Mxy': mxy,
+                        'Thickness': tgt_thick_arr[valid],
+                    }))
 
         df = pd.concat(elem_chunks, ignore_index=True) if elem_chunks else pd.DataFrame()
         df.to_csv(os.path.join(self.stress_output_now2, 'Element_Load.csv'), index=False)
@@ -837,7 +871,6 @@ class LoadExtractionApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_stress(self):
-        op2 = self._load_op2()
         bdf = self._load_bdf()
 
         prop_str = self.stress_prop_entry.get().strip()
@@ -860,16 +893,24 @@ class LoadExtractionApp:
 
         is_material = self.stress_coord_system.get() == 'Material CID'
         self.logger.info(f"🔄 Koordinat sistemi: {self.stress_coord_system.get()}")
-        op2_data = data_in_material_coord(bdf, op2, in_place=False) if is_material else op2
 
-        all_lc_stress = list(set(
-            (list(op2_data.cquad4_stress.keys()) if hasattr(op2_data, 'cquad4_stress') and op2_data.cquad4_stress else []) +
-            (list(op2_data.ctria3_stress.keys())  if hasattr(op2_data, 'ctria3_stress')  and op2_data.ctria3_stress  else [])
-        ))
+        # ── Collect all LCs across all OP2 files ────────────────────────────
+        self.logger.info(f"📂 {len(self.op2_paths)} OP2 dosyası yükleniyor...")
+        all_op2s = {}
+        all_lc_stress = set()
+        for op2_path in self.op2_paths:
+            op2 = self._load_op2(op2_path)
+            all_op2s[op2_path] = op2
+            op2_data_tmp = data_in_material_coord(bdf, op2, in_place=False) if is_material else op2
+            if hasattr(op2_data_tmp, 'cquad4_stress') and op2_data_tmp.cquad4_stress:
+                all_lc_stress.update(op2_data_tmp.cquad4_stress.keys())
+            if hasattr(op2_data_tmp, 'ctria3_stress') and op2_data_tmp.ctria3_stress:
+                all_lc_stress.update(op2_data_tmp.ctria3_stress.keys())
+
         lc_str = self.stress_lc_entry.get().strip()
-        target_lc_ids = set(parse_id_input(lc_str, all_lc_stress))
+        target_lc_ids = set(parse_id_input(lc_str, list(all_lc_stress)))
         if not target_lc_ids:
-            target_lc_ids = set(all_lc_stress)
+            target_lc_ids = all_lc_stress
         self.logger.info(f"✓ {len(target_lc_ids)} load case seçildi")
 
         self.logger.info("🔄 Stress verileri işleniyor...")
@@ -883,48 +924,54 @@ class LoadExtractionApp:
             for lc in target_lc_ids
         }
 
-        stress_sources = []
-        if hasattr(op2_data, 'cquad4_stress') and op2_data.cquad4_stress:
-            stress_sources.append(op2_data.cquad4_stress)
-        if hasattr(op2_data, 'ctria3_stress') and op2_data.ctria3_stress:
-            stress_sources.append(op2_data.ctria3_stress)
+        for op2_path, op2 in all_op2s.items():
+            src_name = os.path.basename(op2_path)
+            self.logger.info(f"  ▸ İşleniyor: {src_name}")
+            op2_data = data_in_material_coord(bdf, op2, in_place=False) if is_material else op2
 
-        for stress_dict in stress_sources:
-            # Build element lookup ONCE — element order is same for all OP2 subcases
-            first_sr    = next(iter(stress_dict.values()))
-            eids_s      = first_sr.element_node[:, 0].astype(int)
-            eid_to_sidx = {}
-            for i, eid in enumerate(eids_s):
-                eid_to_sidx.setdefault(int(eid), []).append(i)
+            stress_sources = []
+            if hasattr(op2_data, 'cquad4_stress') and op2_data.cquad4_stress:
+                stress_sources.append(op2_data.cquad4_stress)
+            if hasattr(op2_data, 'ctria3_stress') and op2_data.ctria3_stress:
+                stress_sources.append(op2_data.ctria3_stress)
 
-            # Pre-compute target (eid, pid, z1_idx, z2_idx, area) once
-            target_elems = [
-                (eid, pid, eid_to_sidx[eid][0], eid_to_sidx[eid][1], element_areas.get(eid, 0.0))
-                for eid, pid in elements_with_properties.items()
-                if eid in eid_to_sidx and len(eid_to_sidx[eid]) >= 2
-            ]
-            self.logger.info(f"✓ {len(target_elems)} element stress verisi hazırlandı")
+            for stress_dict in stress_sources:
+                # Build element lookup ONCE — element order is same for all OP2 subcases
+                first_sr    = next(iter(stress_dict.values()))
+                eids_s      = first_sr.element_node[:, 0].astype(int)
+                eid_to_sidx = {}
+                for i, eid in enumerate(eids_s):
+                    eid_to_sidx.setdefault(int(eid), []).append(i)
 
-            for load_case_id, stress_result in stress_dict.items():
-                if load_case_id not in target_lc_ids:
-                    continue
-                sdata = stress_result.data[0]
-                for eid, pid, z1i, z2i, area in target_elems:
-                    z1 = sdata[z1i];  z2 = sdata[z2i]
-                    ps = property_stress[load_case_id][pid]
-                    ps['sx1']  += z1[1]*area; ps['sy1']  += z1[2]*area; ps['sxy1'] += z1[3]*area
-                    ps['vm1']  += z1[7]*area; ps['p1_1'] += z1[5]*area; ps['p2_1'] += z1[6]*area
-                    ps['sx2']  += z2[1]*area; ps['sy2']  += z2[2]*area; ps['sxy2'] += z2[3]*area
-                    ps['vm2']  += z2[7]*area; ps['p1_2'] += z2[5]*area; ps['p2_2'] += z2[6]*area
-                    element_stress_data.append({
-                        'Property ID':  pid,
-                        'Element ID':   eid,
-                        'Load Case ID': load_case_id,
-                        'Sx_Z1': z1[1], 'Sy_Z1': z1[2], 'Sxy_Z1': z1[3],
-                        'VM_Z1': z1[7], 'P1_Z1': z1[5], 'P2_Z1': z1[6],
-                        'Sx_Z2': z2[1], 'Sy_Z2': z2[2], 'Sxy_Z2': z2[3],
-                        'VM_Z2': z2[7], 'P1_Z2': z2[5], 'P2_Z2': z2[6],
-                    })
+                # Pre-compute target (eid, pid, z1_idx, z2_idx, area) once
+                target_elems = [
+                    (eid, pid, eid_to_sidx[eid][0], eid_to_sidx[eid][1], element_areas.get(eid, 0.0))
+                    for eid, pid in elements_with_properties.items()
+                    if eid in eid_to_sidx and len(eid_to_sidx[eid]) >= 2
+                ]
+                self.logger.info(f"✓ {len(target_elems)} element stress verisi hazırlandı")
+
+                for load_case_id, stress_result in stress_dict.items():
+                    if load_case_id not in target_lc_ids:
+                        continue
+                    sdata = stress_result.data[0]
+                    for eid, pid, z1i, z2i, area in target_elems:
+                        z1 = sdata[z1i];  z2 = sdata[z2i]
+                        ps = property_stress[load_case_id][pid]
+                        ps['sx1']  += z1[1]*area; ps['sy1']  += z1[2]*area; ps['sxy1'] += z1[3]*area
+                        ps['vm1']  += z1[7]*area; ps['p1_1'] += z1[5]*area; ps['p2_1'] += z1[6]*area
+                        ps['sx2']  += z2[1]*area; ps['sy2']  += z2[2]*area; ps['sxy2'] += z2[3]*area
+                        ps['vm2']  += z2[7]*area; ps['p1_2'] += z2[5]*area; ps['p2_2'] += z2[6]*area
+                        element_stress_data.append({
+                            'Property ID':  pid,
+                            'Element ID':   eid,
+                            'Load Case ID': load_case_id,
+                            'Source File':  src_name,
+                            'Sx_Z1': z1[1], 'Sy_Z1': z1[2], 'Sxy_Z1': z1[3],
+                            'VM_Z1': z1[7], 'P1_Z1': z1[5], 'P2_Z1': z1[6],
+                            'Sx_Z2': z2[1], 'Sy_Z2': z2[2], 'Sxy_Z2': z2[3],
+                            'VM_Z2': z2[7], 'P1_Z2': z2[5], 'P2_Z2': z2[6],
+                        })
 
         if not element_stress_data:
             self.logger.info("⚠ Stress verisi bulunamadı (OP2'de STRESS output yok)")
@@ -983,7 +1030,6 @@ class LoadExtractionApp:
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_displacement(self):
-        op2 = self._load_op2()
         bdf = self._load_bdf()
 
         prop_str = self.disp_prop_entry.get().strip()
@@ -999,57 +1045,73 @@ class LoadExtractionApp:
             if elem.type in ('CQUAD4', 'CTRIA3') and elem.pid in target_pids:
                 pid_to_nodes.setdefault(elem.pid, set()).update(elem.node_ids)
 
-        if not op2.displacements:
-            self.logger.error("OP2'de displacement output bulunamadı!")
+        # ── Load all OP2 files and collect LC IDs ───────────────────────────
+        self.logger.info(f"📂 {len(self.op2_paths)} OP2 dosyası yükleniyor...")
+        all_op2s = {}
+        all_lc = set()
+        for op2_path in self.op2_paths:
+            op2 = self._load_op2(op2_path)
+            all_op2s[op2_path] = op2
+            if op2.displacements:
+                all_lc.update(op2.displacements.keys())
+
+        if not all_lc:
+            self.logger.error("OP2 dosyalarında displacement output bulunamadı!")
             messagebox.showerror("Hata", "OP2'de DISPLACEMENT output yok")
             return
 
-        all_lc  = list(op2.displacements.keys())
-        lc_str  = self.disp_lc_entry.get().strip()
-        target_lc = set(parse_id_input(lc_str, all_lc))
+        lc_str    = self.disp_lc_entry.get().strip()
+        target_lc = set(parse_id_input(lc_str, list(all_lc)))
         if not target_lc:
-            target_lc = set(all_lc)
+            target_lc = all_lc
         self.logger.info(f"✓ {len(target_lc)} load case seçildi")
 
         self.logger.info("🔄 Displacement verileri işleniyor...")
-        disp_data = []
-
-        # Build node lookup ONCE — node order is identical across all OP2 subcases
-        first_disp = next(iter(op2.displacements.values()))
-        all_nids   = first_disp.node_gridtype[:, 0].astype(int)
-        nid_to_idx = dict(zip(all_nids, range(len(all_nids))))
-
-        # Pre-compute (pid, nid, model_index) list once
-        pid_nid_idx = []
-        for pid, nodes in pid_to_nodes.items():
-            for nid in nodes:
-                idx = nid_to_idx.get(int(nid))
-                if idx is not None:
-                    pid_nid_idx.append((pid, int(nid), idx))
-        self.logger.info(f"✓ {len(pid_nid_idx)} (property, node) çifti hazırlandı")
-
-        # Pre-extract numpy arrays once — enables single fancy-index per LC
-        idx_arr = np.array([t[2] for t in pid_nid_idx])
-        pid_arr = np.array([t[0] for t in pid_nid_idx])
-        nid_arr = np.array([t[1] for t in pid_nid_idx])
-        n_pairs = len(pid_nid_idx)
-
         disp_chunks = []
-        for lc_id, disp_result in op2.displacements.items():
-            if lc_id not in target_lc:
+
+        for op2_path, op2 in all_op2s.items():
+            if not op2.displacements:
                 continue
-            sub        = disp_result.data[0][idx_arr]   # (n_pairs, 6) — single vectorized slice
-            x, y, z    = sub[:, 0], sub[:, 1], sub[:, 2]
-            rx, ry, rz = sub[:, 3], sub[:, 4], sub[:, 5]
-            mag        = np.sqrt(x**2 + y**2 + z**2)
-            disp_chunks.append(pd.DataFrame({
-                'Property ID':  pid_arr,
-                'Node ID':      nid_arr,
-                'Load Case ID': np.full(n_pairs, lc_id),
-                'X': x, 'Y': y, 'Z': z,
-                'Magnitude':    mag,
-                'Rx': rx, 'Ry': ry, 'Rz': rz,
-            }))
+            src_name = os.path.basename(op2_path)
+            self.logger.info(f"  ▸ İşleniyor: {src_name}")
+
+            # Build node lookup ONCE per file — node order is identical across all OP2 subcases
+            first_disp = next(iter(op2.displacements.values()))
+            all_nids   = first_disp.node_gridtype[:, 0].astype(int)
+            nid_to_idx = dict(zip(all_nids, range(len(all_nids))))
+
+            # Pre-compute (pid, nid, model_index) list once per file
+            pid_nid_idx = []
+            for pid, nodes in pid_to_nodes.items():
+                for nid in nodes:
+                    idx = nid_to_idx.get(int(nid))
+                    if idx is not None:
+                        pid_nid_idx.append((pid, int(nid), idx))
+
+            if not pid_nid_idx:
+                continue
+
+            idx_arr = np.array([t[2] for t in pid_nid_idx])
+            pid_arr = np.array([t[0] for t in pid_nid_idx])
+            nid_arr = np.array([t[1] for t in pid_nid_idx])
+            n_pairs = len(pid_nid_idx)
+
+            for lc_id, disp_result in op2.displacements.items():
+                if lc_id not in target_lc:
+                    continue
+                sub        = disp_result.data[0][idx_arr]   # (n_pairs, 6)
+                x, y, z    = sub[:, 0], sub[:, 1], sub[:, 2]
+                rx, ry, rz = sub[:, 3], sub[:, 4], sub[:, 5]
+                mag        = np.sqrt(x**2 + y**2 + z**2)
+                disp_chunks.append(pd.DataFrame({
+                    'Property ID':  pid_arr,
+                    'Node ID':      nid_arr,
+                    'Load Case ID': np.full(n_pairs, lc_id),
+                    'Source File':  src_name,
+                    'X': x, 'Y': y, 'Z': z,
+                    'Magnitude':    mag,
+                    'Rx': rx, 'Ry': ry, 'Rz': rz,
+                }))
 
         df_all = pd.concat(disp_chunks, ignore_index=True) if disp_chunks else pd.DataFrame()
         df_all.to_csv(os.path.join(self.stress_output_now2, 'Displacement_All.csv'), index=False)
@@ -1076,45 +1138,53 @@ class LoadExtractionApp:
             messagebox.showerror("Hata", "Element ID'leri girin (tüm için: ALL)")
             return
 
-        op2 = self._load_op2()
+        # ── Load all OP2 files ───────────────────────────────────────────────
+        self.logger.info(f"📂 {len(self.op2_paths)} OP2 dosyası yükleniyor...")
+        all_op2s = {}
+        all_eids_set = set()
+        all_lc_bush = set()
+        for op2_path in self.op2_paths:
+            op2 = self._load_op2(op2_path)
+            all_op2s[op2_path] = op2
+            for lc, ef in op2.cbush_force.items():
+                all_eids_set.update(int(e) for e in ef.element)
+                all_lc_bush.add(lc)
 
         self.logger.info("🔍 Element ID'leri parse ediliyor...")
-        all_eids = []
-        for load_case_id, element_forces in op2.cbush_force.items():
-            all_eids.extend(element_forces.element)
-        all_eids = list(set(all_eids))
-
+        all_eids = list(all_eids_set)
         selected_element_ids = parse_id_input(self.bush_element_ids, all_eids)
         if not selected_element_ids:
             selected_element_ids = all_eids
         self.logger.info(f"✓ {len(selected_element_ids)} element ID seçildi")
 
-        all_lc_bush = list(op2.cbush_force.keys())
         lc_input_str = self.bush_loadcase_id_entry.get().strip()
-        target_lc_bush = set(parse_id_input(lc_input_str, all_lc_bush))
+        target_lc_bush = set(parse_id_input(lc_input_str, list(all_lc_bush)))
         if not target_lc_bush:
-            target_lc_bush = set(all_lc_bush)
+            target_lc_bush = all_lc_bush
         self.logger.info(f"✓ {len(target_lc_bush)} load case seçildi")
 
         self.logger.info("🔄 Bush force verileri çıkarılıyor...")
         bush_forces_data = []
         selected_set = set(int(e) for e in selected_element_ids)
-        for load_case_id, element_forces in op2.cbush_force.items():
-            if load_case_id not in target_lc_bush:
-                continue
-            element_ids = element_forces.element
-            forces_data = element_forces.data[0]
-            load_ids    = element_forces.loadIDs[0]
-            for i, element_id in enumerate(element_ids):
-                if int(element_id) in selected_set:
-                    forces = forces_data[i][:3]
-                    bush_forces_data.append({
-                        'Element ID':  element_id,
-                        'Load Case ID': load_ids,
-                        'FX': forces[0],
-                        'FY': forces[1],
-                        'FZ': forces[2],
-                    })
+        for op2_path, op2 in all_op2s.items():
+            src_name = os.path.basename(op2_path)
+            for load_case_id, element_forces in op2.cbush_force.items():
+                if load_case_id not in target_lc_bush:
+                    continue
+                element_ids = element_forces.element
+                forces_data = element_forces.data[0]
+                load_ids    = element_forces.loadIDs[0]
+                for i, element_id in enumerate(element_ids):
+                    if int(element_id) in selected_set:
+                        forces = forces_data[i][:3]
+                        bush_forces_data.append({
+                            'Element ID':   element_id,
+                            'Load Case ID': load_ids,
+                            'Source File':  src_name,
+                            'FX': forces[0],
+                            'FY': forces[1],
+                            'FZ': forces[2],
+                        })
 
         df_bush_raw = pd.DataFrame(bush_forces_data)
         output_csv_bush_raw = os.path.join(self.stress_output_now2, 'Bush_Load_Raw.csv')
